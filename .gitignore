@@ -53,7 +53,6 @@ humanoidverse/data/Recorded/
 humanoidverse/data/AMASS/
 AMASS/*
 
-*.sh
 *.txt
 *.zip
 
@@ -68,7 +67,6 @@ README_FULL.md
 humanoidverse/agents/callbacks/analysis_plot_decoupled_loco_manip_perf.py
 humanoidverse/config/opt/eval_analysis_plot_decoupled_loco_manip_perf.yaml
 debug_logs
-scripts
 booster_robotics_sdk/
 unitree_sdk2_python/
 !sim2real/requirements.txt

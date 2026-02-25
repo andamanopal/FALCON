@@ -1,0 +1,80 @@
+# @package _global_
+#
+# AnticiPose experiment config.
+#
+# Extends FALCON's decoupled WBC + force locomotion experiment.
+# Key change: env._target_ points to AnticiPoseEnv; anticipose_mode
+# and related fields are added under env.config.
+#
+# The obs config is NOT set here --- it must be provided per-mode:
+#   B1 reactive:    +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma
+#   B2 oracle:      +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_oracle
+#   B4a direct_plan: +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
+#   B5 anticipose:  +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
+#
+# Usage examples:
+#   # B1 reactive (default):
+#   python humanoidverse/train_agent.py +exp=anticipose \
+#       +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma ...
+#
+#   # B2 oracle:
+#   python humanoidverse/train_agent.py +exp=anticipose \
+#       +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_oracle \
+#       env.config.anticipose_mode=oracle ...
+#
+#   # B5 anticipose:
+#   python humanoidverse/train_agent.py +exp=anticipose \
+#       +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose \
+#       env.config.anticipose_mode=anticipose \
+#       ++env.config.wrench_predictor_ckpt=/path/to/predictor.pt ...
+
+defaults:
+  - /algo: ppo_decoupled_wbc_ma
+  - /env: decoupled_locomotion_stand_height_waist_wbc_ma_diff_force
+
+experiment_name: AnticiPose
+
+# Override env._target_ to use AnticiPoseEnv instead of the FALCON parent.
+# All other env.config fields from the defaults are inherited unchanged.
+env:
+  _target_: humanoidverse.envs.anticipose_env.AnticiPoseEnv
+  _recursive_: False
+
+  config:
+    # ------------------------------------------------------------------
+    # AnticiPose-specific fields
+    # ------------------------------------------------------------------
+
+    # Baseline mode selector.  One of:
+    #   "reactive"    -- B1: standard FALCON, no extra obs
+    #   "oracle"      -- B2: ground-truth future wrenches (needs oracle YAML)
+    #   "direct_plan" -- B4a: raw arm plan (needs direct_plan YAML)
+    #   "anticipose"  -- B5: predicted wrenches (needs anticipose YAML + ckpt)
+    anticipose_mode: reactive
+
+    # Look-ahead horizon (H).  H=5 steps @ 50 Hz = 100 ms.
+    anticipose_horizon: 5
+
+    # Arm trajectory task type fed to ArmTrajectoryGenerator.
+    # Options: "random" | "frontal_reach_lift" | "lateral_shelf_pick" |
+    #          "forward_push" | "lateral_slam_down" | "cross_body_reach"
+    arm_trajectory_task: random
+
+    # ------------------------------------------------------------------
+    # Wrench data collection (B1 stage only)
+    # ------------------------------------------------------------------
+
+    # Set to true when running B1 to collect (obs, arm_plan, wrench) tuples
+    # for offline wrench predictor training.
+    collect_wrench_data: false
+
+    # Ring buffer capacity for data collection.
+    collect_buffer_size: 500000
+
+    # ------------------------------------------------------------------
+    # Wrench predictor checkpoint (B5 anticipose mode only)
+    # ------------------------------------------------------------------
+
+    # Path to trained wrench predictor (.pt state-dict or TorchScript).
+    # Set via CLI: ++env.config.wrench_predictor_ckpt=/path/to/pred.pt
+    wrench_predictor_ckpt: null
