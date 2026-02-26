@@ -85,6 +85,50 @@ log_stage() {
   echo "========================================================================"
 }
 
+# Re-log TensorBoard events to WandB for a completed training run.
+# WandB's sync_tensorboard=True often stops mid-run; this reads the
+# TB events file directly and logs all data to a fresh WandB run.
+sync_wandb() {
+  local run_dir="$1"
+  local run_name="$2"
+  echo "[wandb] Re-logging TensorBoard data from ${run_dir}"
+  python - "${run_dir}" "${run_name}" <<'PYEOF'
+import sys
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+import wandb
+
+run_dir = sys.argv[1]
+run_name = sys.argv[2]
+
+ea = EventAccumulator(run_dir)
+ea.Reload()
+tags = ea.Tags().get("scalars", [])
+if not tags:
+    print(f"[wandb] No scalar tags found in {run_dir}")
+    sys.exit(0)
+
+step_data = {}
+for tag in tags:
+    for event in ea.Scalars(tag):
+        step = event.step
+        if step not in step_data:
+            step_data[step] = {}
+        step_data[step][tag] = event.value
+
+print(f"[wandb] Found {len(tags)} tags, {len(step_data)} steps")
+run = wandb.init(
+    project="AnticiPose",
+    entity="andaman-l",
+    name=run_name,
+    tags=["resync"],
+)
+for step in sorted(step_data.keys()):
+    wandb.log(step_data[step], step=step)
+wandb.finish()
+print("[wandb] Sync complete")
+PYEOF
+}
+
 # ---------------------------------------------------------------------------
 # Stage 1: B1 reactive (~2.5 h)
 # ---------------------------------------------------------------------------
@@ -101,6 +145,8 @@ ${TRAIN_CMD} \
 # Locate the checkpoint written by the run above.
 B1_RUN_DIR=$(ls -td "${BASE_LOG_DIR}/anticipose_overnight/"*"B1_reactive_seed${SEED}"* | head -1)
 echo "[Stage 1] Run dir: ${B1_RUN_DIR}"
+
+sync_wandb "${B1_RUN_DIR}" "B1_reactive_seed${SEED}"
 
 B1_CHECKPOINT="${B1_RUN_DIR}/model_${NUM_ITERS}.pt"
 
@@ -172,6 +218,7 @@ ${TRAIN_CMD} \
 
 B2_RUN_DIR=$(ls -td "${BASE_LOG_DIR}/anticipose_overnight/"*"B2_oracle_seed${SEED}"* | head -1)
 echo "[Stage 3] Run dir: ${B2_RUN_DIR}"
+sync_wandb "${B2_RUN_DIR}" "B2_oracle_seed${SEED}"
 
 # ---------------------------------------------------------------------------
 # Stage 4a: B5 anticipose (~2.5 h)
@@ -188,6 +235,7 @@ ${TRAIN_CMD} \
   "algo.config.num_learning_iterations=${NUM_ITERS}"
 
 B5_RUN_DIR=$(ls -td "${BASE_LOG_DIR}/anticipose_overnight/"*"B5_anticipose_seed${SEED}"* | head -1)
+sync_wandb "${B5_RUN_DIR}" "B5_anticipose_seed${SEED}"
 
 # ---------------------------------------------------------------------------
 # Stage 4b: B4a direct_plan (~2.5 h)
@@ -203,6 +251,7 @@ ${TRAIN_CMD} \
   "algo.config.num_learning_iterations=${NUM_ITERS}"
 
 B4A_RUN_DIR=$(ls -td "${BASE_LOG_DIR}/anticipose_overnight/"*"B4a_direct_plan_seed${SEED}"* | head -1)
+sync_wandb "${B4A_RUN_DIR}" "B4a_direct_plan_seed${SEED}"
 
 # ---------------------------------------------------------------------------
 # Stage 5: Evaluation -- training tasks + held-out arm tasks
