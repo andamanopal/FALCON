@@ -254,72 +254,76 @@ B4A_RUN_DIR=$(ls -td "${BASE_LOG_DIR}/anticipose_overnight/"*"B4a_direct_plan_se
 sync_wandb "${B4A_RUN_DIR}" "B4a_direct_plan_seed${SEED}"
 
 # ---------------------------------------------------------------------------
-# Stage 5: Evaluation -- training tasks + held-out arm tasks
+# Stage 5: Evaluation -- training tasks + held-out arm tasks (500 episodes)
 # ---------------------------------------------------------------------------
-log_stage "Stage 5/5 -- Evaluation (all 4 baselines)"
+log_stage "Stage 5/5 -- Evaluation (all 4 baselines, 500 episodes each)"
 
-# The eval script loads the training config from the checkpoint's config.yaml,
-# so we only need to pass: checkpoint, eval_name, and any overrides.
-# All keys must use + (append) since base_eval.yaml is minimal.
-EVAL_CMD="python humanoidverse/eval_agent.py"
-EVAL_COMMON=(
-  "++headless=true"
-  "++num_envs=64"
-)
+EVAL_CMD="python scripts/eval_baselines.py"
+EVAL_EPISODES=500
+EVAL_ENVS=64
+EVAL_MAX_S=20
 
 # --- B1 reactive ---
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B1_CHECKPOINT}" \
-  "++eval_name=eval_B1_reactive_train" \
-  "++env.config.arm_trajectory_task=random"
+  --checkpoint "${B1_CHECKPOINT}" \
+  --eval_name "eval_B1_reactive_train_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task random
 
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B1_CHECKPOINT}" \
-  "++eval_name=eval_B1_reactive_heldout" \
-  "++env.config.arm_trajectory_task=lateral_slam_down"
+  --checkpoint "${B1_CHECKPOINT}" \
+  --eval_name "eval_B1_reactive_heldout_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task lateral_slam_down
 
 # --- B2 oracle ---
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "++eval_name=eval_B2_oracle_train" \
-  "++env.config.arm_trajectory_task=random"
+  --checkpoint "${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  --eval_name "eval_B2_oracle_train_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task random
 
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "++eval_name=eval_B2_oracle_heldout" \
-  "++env.config.arm_trajectory_task=lateral_slam_down"
-
-# --- B4a direct_plan ---
-${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "++eval_name=eval_B4a_direct_plan_train" \
-  "++env.config.arm_trajectory_task=random"
-
-${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "++eval_name=eval_B4a_direct_plan_heldout" \
-  "++env.config.arm_trajectory_task=lateral_slam_down"
+  --checkpoint "${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  --eval_name "eval_B2_oracle_heldout_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task lateral_slam_down
 
 # --- B5 anticipose ---
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "++eval_name=eval_B5_anticipose_train" \
-  "++env.config.arm_trajectory_task=random" \
-  "++env.config.wrench_predictor_ckpt=${PREDICTOR_CKPT}"
+  --checkpoint "${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  --eval_name "eval_B5_anticipose_train_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task random \
+  --wrench_predictor_ckpt "${PREDICTOR_CKPT}"
 
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" \
-  "++checkpoint=${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "++eval_name=eval_B5_anticipose_heldout" \
-  "++env.config.arm_trajectory_task=lateral_slam_down" \
-  "++env.config.wrench_predictor_ckpt=${PREDICTOR_CKPT}"
+  --checkpoint "${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  --eval_name "eval_B5_anticipose_heldout_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task lateral_slam_down \
+  --wrench_predictor_ckpt "${PREDICTOR_CKPT}"
+
+# --- B4a direct_plan ---
+${EVAL_CMD} \
+  --checkpoint "${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  --eval_name "eval_B4a_direct_plan_train_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task random
+
+${EVAL_CMD} \
+  --checkpoint "${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  --eval_name "eval_B4a_direct_plan_heldout_s${SEED}" \
+  --num_episodes ${EVAL_EPISODES} --num_envs ${EVAL_ENVS} \
+  --max_episode_length_s ${EVAL_MAX_S} \
+  --arm_trajectory_task lateral_slam_down
 
 log_stage "All stages complete"
 echo "Log root : ${BASE_LOG_DIR}/anticipose_overnight/"
