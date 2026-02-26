@@ -258,83 +258,68 @@ sync_wandb "${B4A_RUN_DIR}" "B4a_direct_plan_seed${SEED}"
 # ---------------------------------------------------------------------------
 log_stage "Stage 5/5 -- Evaluation (all 4 baselines)"
 
-EVAL_CMD="python humanoidverse/eval_agent.py +exp=anticipose"
+# The eval script loads the training config from the checkpoint's config.yaml,
+# so we only need to pass: checkpoint, eval_name, and any overrides.
+# All keys must use + (append) since base_eval.yaml is minimal.
+EVAL_CMD="python humanoidverse/eval_agent.py"
 EVAL_COMMON=(
-  "${COMMON_OVERRIDES[@]}"
-  "project_name=anticipose_overnight"
-  "num_envs=64"
-  "headless=true"
+  "++headless=true"
+  "++num_envs=64"
 )
 
 # --- B1 reactive ---
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_BASE}" \
-  "experiment_name=eval_B1_reactive_train" \
-  "env.config.anticipose_mode=reactive" \
-  "env.config.arm_trajectory_task=random" \
-  "checkpoint=${B1_CHECKPOINT}" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B1_CHECKPOINT}" \
+  "++eval_name=eval_B1_reactive_train" \
+  "++env.config.arm_trajectory_task=random"
 
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_BASE}" \
-  "experiment_name=eval_B1_reactive_heldout" \
-  "env.config.anticipose_mode=reactive" \
-  "env.config.arm_trajectory_task=lateral_slam_down" \
-  "checkpoint=${B1_CHECKPOINT}" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B1_CHECKPOINT}" \
+  "++eval_name=eval_B1_reactive_heldout" \
+  "++env.config.arm_trajectory_task=lateral_slam_down"
 
 # --- B2 oracle ---
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_ORACLE}" \
-  "experiment_name=eval_B2_oracle_train" \
-  "env.config.anticipose_mode=oracle" \
-  "env.config.arm_trajectory_task=random" \
-  "checkpoint=${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  "++eval_name=eval_B2_oracle_train" \
+  "++env.config.arm_trajectory_task=random"
 
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_ORACLE}" \
-  "experiment_name=eval_B2_oracle_heldout" \
-  "env.config.anticipose_mode=oracle" \
-  "env.config.arm_trajectory_task=lateral_slam_down" \
-  "checkpoint=${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B2_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  "++eval_name=eval_B2_oracle_heldout" \
+  "++env.config.arm_trajectory_task=lateral_slam_down"
 
 # --- B4a direct_plan ---
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_DIRECT_PLAN}" \
-  "experiment_name=eval_B4a_direct_plan_train" \
-  "env.config.anticipose_mode=direct_plan" \
-  "env.config.arm_trajectory_task=random" \
-  "checkpoint=${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  "++eval_name=eval_B4a_direct_plan_train" \
+  "++env.config.arm_trajectory_task=random"
 
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_DIRECT_PLAN}" \
-  "experiment_name=eval_B4a_direct_plan_heldout" \
-  "env.config.anticipose_mode=direct_plan" \
-  "env.config.arm_trajectory_task=lateral_slam_down" \
-  "checkpoint=${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B4A_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  "++eval_name=eval_B4a_direct_plan_heldout" \
+  "++env.config.arm_trajectory_task=lateral_slam_down"
 
 # --- B5 anticipose ---
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_ANTICIPOSE}" \
-  "experiment_name=eval_B5_anticipose_train" \
-  "env.config.anticipose_mode=anticipose" \
-  "env.config.arm_trajectory_task=random" \
-  "++env.config.wrench_predictor_ckpt=${PREDICTOR_CKPT}" \
-  "checkpoint=${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  "++eval_name=eval_B5_anticipose_train" \
+  "++env.config.arm_trajectory_task=random" \
+  "++env.config.wrench_predictor_ckpt=${PREDICTOR_CKPT}"
 
 ${EVAL_CMD} \
-  "${EVAL_COMMON[@]}" "${OBS_ANTICIPOSE}" \
-  "experiment_name=eval_B5_anticipose_heldout" \
-  "env.config.anticipose_mode=anticipose" \
-  "env.config.arm_trajectory_task=lateral_slam_down" \
-  "++env.config.wrench_predictor_ckpt=${PREDICTOR_CKPT}" \
-  "checkpoint=${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
-  "auto_load_latest=false"
+  "${EVAL_COMMON[@]}" \
+  "++checkpoint=${B5_RUN_DIR}/model_${NUM_ITERS}.pt" \
+  "++eval_name=eval_B5_anticipose_heldout" \
+  "++env.config.arm_trajectory_task=lateral_slam_down" \
+  "++env.config.wrench_predictor_ckpt=${PREDICTOR_CKPT}"
 
 log_stage "All stages complete"
 echo "Log root : ${BASE_LOG_DIR}/anticipose_overnight/"
