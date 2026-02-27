@@ -41,6 +41,7 @@ PRED_BATCH      ?= 4096
 PRED_PATIENCE   ?= 10
 COLLECT_SAMPLES ?= 500000
 VENV            ?= /workspace/AnticiPose/.venv/bin/activate
+EVAL_EXTRA_ARGS ?=
 
 # Derived paths
 PRED_CKPT         = $(LOG_DIR)/$(PROJECT)/wrench_predictor_seed$(SEED).pt
@@ -349,14 +350,14 @@ eval-b1:
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
-	  --output_dir $(OUTPUT_DIR) && \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B1_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B1_reactive_heldout_s$(SEED) \
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
-	  --output_dir $(OUTPUT_DIR)
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 ## eval-b2: Evaluate B2 extended history
 eval-b2:
@@ -368,14 +369,14 @@ eval-b2:
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
-	  --output_dir $(OUTPUT_DIR) && \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B2_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B2_extended_history_heldout_s$(SEED) \
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
-	  --output_dir $(OUTPUT_DIR)
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 ## eval-b3: Evaluate B3 current wrench
 eval-b3:
@@ -387,14 +388,14 @@ eval-b3:
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
-	  --output_dir $(OUTPUT_DIR) && \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B3_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B3_current_wrench_heldout_s$(SEED) \
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
-	  --output_dir $(OUTPUT_DIR)
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 ## eval-b4a: Evaluate B4a direct plan (actor)
 eval-b4a:
@@ -406,14 +407,14 @@ eval-b4a:
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
-	  --output_dir $(OUTPUT_DIR) && \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B4A_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B4a_direct_plan_heldout_s$(SEED) \
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
-	  --output_dir $(OUTPUT_DIR)
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 ## eval-b4b: Evaluate B4b direct plan (critic only)
 eval-b4b:
@@ -425,14 +426,14 @@ eval-b4b:
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
-	  --output_dir $(OUTPUT_DIR) && \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B4B_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B4b_direct_plan_critic_heldout_s$(SEED) \
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
-	  --output_dir $(OUTPUT_DIR)
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 ## eval-b5: Evaluate B5 anticipose
 eval-b5:
@@ -445,7 +446,7 @@ eval-b5:
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
 	  --wrench_predictor_ckpt $(PRED_CKPT) \
-	  --output_dir $(OUTPUT_DIR) && \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B5_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B5_anticipose_heldout_s$(SEED) \
@@ -453,7 +454,7 @@ eval-b5:
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
 	  --wrench_predictor_ckpt $(PRED_CKPT) \
-	  --output_dir $(OUTPUT_DIR)
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 ## eval-b6: Evaluate B6 CVAE latent
 eval-b6:
@@ -466,7 +467,7 @@ eval-b6:
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
 	  --cvae_ckpt $(CVAE_CKPT) \
-	  --output_dir $(OUTPUT_DIR) && \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B6_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B6_cvae_heldout_s$(SEED) \
@@ -474,7 +475,7 @@ eval-b6:
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
 	  --cvae_ckpt $(CVAE_CKPT) \
-	  --output_dir $(OUTPUT_DIR)
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 # ============================================================================
 # UTILITIES
@@ -486,7 +487,8 @@ smoke-test:
 	  NUM_ITERS=2 NUM_ENVS=4 NUM_EPISODES=2 \
 	  EVAL_NUM_ENVS=4 COLLECT_SAMPLES=100 \
 	  PRED_EPOCHS=2 PRED_BATCH=32 PRED_PATIENCE=1 \
-	  PROJECT=anticipose_smoke_test
+	  PROJECT=anticipose_smoke_test \
+	  EVAL_EXTRA_ARGS="--walking_speeds 0.0 0.6"
 
 ## sync-wandb: Re-log TensorBoard data to WandB for all baselines
 sync-wandb:
@@ -504,7 +506,7 @@ results:
 	@echo ""
 	@printf "%-45s %12s %12s %12s\n" "Eval Name" "Mean Reward" "Mean EpLen" "Survival%"
 	@printf "%-45s %12s %12s %12s\n" "---------------------------------------------" "------------" "------------" "------------"
-	@for f in $(OUTPUT_DIR)/eval_*_s$(SEED)/results.json; do \
+	@for f in $(OUTPUT_DIR)/eval_*_s$(SEED)*/results.json; do \
 	  if [ -f "$$f" ]; then \
 	    python -c "import json, sys; d = json.load(open('$$f')); print(f\"{d['eval_name']:<45s} {d['mean_reward']:>12.2f} {d['mean_episode_length']:>12.1f} {d['survival_rate']*100:>11.1f}%\")" ; \
 	  fi ; \
