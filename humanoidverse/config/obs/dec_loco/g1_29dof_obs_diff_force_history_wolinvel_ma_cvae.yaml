@@ -1,7 +1,14 @@
 # @package _global_
 #
-# Base obs config (B1 reactive / B2 extended history).
-# Critic uses current_wrench (shared privileged signal across ALL baselines).
+# AnticiPose B6 (CVAE latent) obs config.
+# Extends base with cvae_latent (30 dims) — same dim as B5's predicted_wrench.
+# Per-step actor obs: 115 + 30 = 145 dims.
+# With history_length=5: 145 x 5 = 725 dims total.
+#
+# This is a controlled comparison against B5: identical obs dims, identical
+# critic, identical training pipeline.  The only difference is what the 30
+# extra actor dims represent — predicted wrench (B5) vs CVAE latent (B6).
+
 obs:
   use_phase: True
   obs_dict:
@@ -18,8 +25,7 @@ obs:
       dof_pos,
       dof_vel,
       actions,
-      # sin_phase,
-      # cos_phase,
+      cvae_latent,
     ]
 
     critic_obs: [
@@ -38,7 +44,7 @@ obs:
       actions,
       current_wrench,
     ]
-  
+
   history_length:
     actor_obs: 5
     critic_obs: 1
@@ -59,29 +65,12 @@ obs:
     actions: 1.0,
     sin_phase: 1.0,
     cos_phase: 1.0,
-    current_wrench: 1.0,
     history_actor: 1.0,
+    cvae_latent: 1.0,
+    current_wrench: 1.0,
   }
-  
+
   add_noise: False
-  # noise_scales: {
-  #   base_lin_vel: 0.0,
-  #   base_ang_vel: 0.2,
-  #   projected_gravity: 0.05,
-  #   command_lin_vel: 0.0,
-  #   command_ang_vel: 0.0,
-  #   command_stand: 0.0,
-  #   command_base_height: 0.0,
-  #   ref_upper_dof_pos: 0.01,
-  #   dof_pos: 0.01,
-  #   dof_vel: 1.5, # 1.5
-  #   actions: 0.0,
-  #   sin_phase: 0.0,
-  #   cos_phase: 0.0,
-  #   phase_time: 0.0,
-  #   history_actor: 0.0,
-  #   history_critic: 0.0,
-  # }
   noise_scales: {
     base_orientation: 0.0,
     base_lin_vel: 0.0,
@@ -94,16 +83,15 @@ obs:
     command_base_height: 0.0,
     ref_upper_dof_pos: 0.0,
     dof_pos: 0.01,
-    dof_vel: 0.1, # 1.5
+    dof_vel: 0.1,
     actions: 0.0,
     sin_phase: 0.0,
     cos_phase: 0.0,
-    current_wrench: 0.0,
     history_actor: 0.0,
+    cvae_latent: 0.0,
+    current_wrench: 0.0,
   }
 
-  # obs_dims should use list instead of dict
-  # will be converted to dict in `pre_process_config`
   obs_dims:
     - base_orientation: 4
     - base_lin_vel: 3
@@ -114,10 +102,11 @@ obs:
     - command_stand: 1
     - command_waist_dofs: 3
     - command_base_height: 1
-    - ref_upper_dof_pos: ${robot.upper_body_actions_dim} # upper body actions
+    - ref_upper_dof_pos: ${robot.upper_body_actions_dim}
     - dof_pos: ${robot.dof_obs_size}
     - dof_vel: ${robot.dof_obs_size}
-    - actions: ${robot.dof_obs_size} # wbc body actions
+    - actions: ${robot.dof_obs_size}
     - sin_phase: 1
     - cos_phase: 1
+    - cvae_latent: 30
     - current_wrench: 6

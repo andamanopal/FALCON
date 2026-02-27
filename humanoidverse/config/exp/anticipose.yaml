@@ -7,20 +7,18 @@
 # and related fields are added under env.config.
 #
 # The obs config is NOT set here --- it must be provided per-mode:
-#   B1 reactive:    +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma
-#   B2 oracle:      +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_oracle
-#   B4a direct_plan: +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
-#   B5 anticipose:  +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
+#   B1   reactive:      +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma
+#   B2   extended hist:  +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_extended_history
+#   B3   current_wrench: +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_current_wrench
+#   B4a  direct_plan:    +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
+#   B4b  direct_plan_critic: +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_critic
+#   B5   anticipose:     +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
+#   B6   cvae:           +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_cvae
 #
 # Usage examples:
 #   # B1 reactive (default):
 #   python humanoidverse/train_agent.py +exp=anticipose \
 #       +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma ...
-#
-#   # B2 oracle:
-#   python humanoidverse/train_agent.py +exp=anticipose \
-#       +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_oracle \
-#       env.config.anticipose_mode=oracle ...
 #
 #   # B5 anticipose:
 #   python humanoidverse/train_agent.py +exp=anticipose \
@@ -46,10 +44,10 @@ env:
     # ------------------------------------------------------------------
 
     # Baseline mode selector.  One of:
-    #   "reactive"    -- B1: standard FALCON, no extra obs
-    #   "oracle"      -- B2: ground-truth future wrenches (needs oracle YAML)
-    #   "direct_plan" -- B4a: raw arm plan (needs direct_plan YAML)
+    #   "reactive"    -- B1/B2/B3: standard FALCON variations
+    #   "direct_plan" -- B4a/B4b: raw arm plan
     #   "anticipose"  -- B5: predicted wrenches (needs anticipose YAML + ckpt)
+    #   "cvae"        -- B6: CVAE latent encoding (needs cvae YAML + ckpt)
     anticipose_mode: reactive
 
     # Look-ahead horizon (H).  H=5 steps @ 50 Hz = 100 ms.
@@ -78,3 +76,19 @@ env:
     # Path to trained wrench predictor (.pt state-dict or TorchScript).
     # Set via CLI: ++env.config.wrench_predictor_ckpt=/path/to/pred.pt
     wrench_predictor_ckpt: null
+
+    # ------------------------------------------------------------------
+    # CVAE encoder checkpoint (B6 cvae mode only)
+    # ------------------------------------------------------------------
+
+    # Path to trained CVAE encoder (.pt state-dict or TorchScript).
+    # Set via CLI: ++env.config.cvae_ckpt=/path/to/cvae.pt
+    cvae_ckpt: null
+
+    # ------------------------------------------------------------------
+    # Payload simulation
+    # ------------------------------------------------------------------
+
+    # Maximum payload mass in kg (randomized per env at reset).
+    # Set to 0.0 to disable payload simulation.
+    max_payload_mass: 5.0

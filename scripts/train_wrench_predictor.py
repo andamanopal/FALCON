@@ -3,18 +3,16 @@ train_wrench_predictor.py
 -------------------------
 Supervised offline training for the frozen WrenchPredictor MLP.
 
-Data format (from wrench_data_collector.py):
+Data format (from wrench_data_collector.py with temporal-offset alignment):
     .pt file containing a dict with keys:
-        "obs"    : (N, 115) float32  -- per-step actor obs
-        "plan"   : (N,  70) float32  -- arm plan (H=5 x 14 joints)
-        "wrench" : (N,   6) float32  -- analytical wrench (force_xyz + torque_xyz)
+        "obs"    : (N, 115) float32  -- per-step actor obs at time t
+        "plan"   : (N,  70) float32  -- arm plan at time t (H=5 x 14 joints)
+        "wrench" : (N,  30) float32  -- future wrench sequence
+                                        [w_{t+1}, ..., w_{t+H}] (H x 6)
 
-The wrench targets stored by WrenchDataCollector are 6-dimensional per step
-(one wrench vector).  The WrenchPredictor predicts 30-dimensional output
-(H=5 x 6).  During training we treat each sample independently, so the
-training target is the *current* 6-dim wrench, and the model is supervised
-to predict a sequence.  We therefore replicate the 6-dim target H=5 times
-to form the 30-dim supervision signal.
+The wrench targets are 30-dimensional: H=5 future wrench vectors concatenated,
+each 6D (force_xyz + torque_xyz).  These are produced by the temporal-offset
+data collector which aligns (obs_t, plan_t) with future wrenches.
 
 Z-score normalization statistics are computed on the training split and stored
 as buffers inside the model checkpoint so that inference code needs no
@@ -95,6 +93,9 @@ def _load_predictor_class():
 def load_dataset(data_path: str, device: torch.device):
     """Load .pt file produced by WrenchDataCollector.save().
 
+    The collector now produces temporally-aligned 30-dim future wrench
+    targets directly, so no tiling/replication is needed.
+
     Returns:
         obs    (N, 115), plan (N, 70), wrench_target (N, 30)  -- all on CPU
         (tensors are kept on CPU; the DataLoader will transfer per-batch)
@@ -102,28 +103,27 @@ def load_dataset(data_path: str, device: torch.device):
     log.info(f"Loading dataset from {data_path}")
     raw = torch.load(data_path, map_location="cpu", weights_only=True)
 
-    obs    = raw["obs"].float()     # (N, 115)
-    plan   = raw["plan"].float()    # (N, 70)
-    wrench = raw["wrench"].float()  # (N, 6)
+    obs = raw["obs"].float()              # (N, 115)
+    plan = raw["plan"].float()            # (N, 70)
+    wrench_target = raw["wrench"].float() # (N, 30) — H future wrenches
 
     n_samples = obs.shape[0]
-    log.info(f"  Loaded {n_samples:,} samples")
+    log.info(f"  Loaded {n_samples:,} aligned training pairs")
     log.info(f"  obs shape:    {tuple(obs.shape)}")
     log.info(f"  plan shape:   {tuple(plan.shape)}")
-    log.info(f"  wrench shape: {tuple(wrench.shape)}")
+    log.info(f"  wrench shape: {tuple(wrench_target.shape)}")
 
     # Validate dimensions
-    assert obs.shape[1] == OBS_DIM,    f"Expected obs dim {OBS_DIM}, got {obs.shape[1]}"
-    assert plan.shape[1] == PLAN_DIM,  f"Expected plan dim {PLAN_DIM}, got {plan.shape[1]}"
-    assert wrench.shape[1] == WRENCH_DIM, (
-        f"Expected wrench dim {WRENCH_DIM}, got {wrench.shape[1]}"
+    assert obs.shape[1] == OBS_DIM, (
+        f"Expected obs dim {OBS_DIM}, got {obs.shape[1]}"
     )
-
-    # Expand 6-dim wrench to 30-dim target by replicating H=5 times.
-    # Each sample's supervision signal is the same wrench repeated for
-    # each of the H future steps (approximation; exact multi-step targets
-    # require temporal alignment which is out of scope for offline training).
-    wrench_target = wrench.repeat(1, HORIZON)  # (N, 30)
+    assert plan.shape[1] == PLAN_DIM, (
+        f"Expected plan dim {PLAN_DIM}, got {plan.shape[1]}"
+    )
+    assert wrench_target.shape[1] == OUTPUT_DIM, (
+        f"Expected wrench target dim {OUTPUT_DIM}, got {wrench_target.shape[1]}. "
+        f"Data may be from old collector (6-dim). Re-collect with temporal-offset collector."
+    )
 
     return obs, plan, wrench_target
 

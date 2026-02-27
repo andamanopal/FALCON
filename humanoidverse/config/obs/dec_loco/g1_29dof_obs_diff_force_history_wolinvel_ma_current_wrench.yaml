@@ -1,9 +1,10 @@
 # @package _global_
 #
-# AnticiPose B2 (oracle) obs config.
-# Extends base with oracle_wrench (30 dims = H=5 x 6D wrench).
-# Per-step actor obs: 115 + 30 = 145 dims.
-# With history_length=5: 145 x 5 = 725 dims total.
+# AnticiPose B3 (current wrench) obs config.
+# Extends base with current_wrench (6 dims) in the ACTOR obs.
+# Tests whether reactive wrench feedback helps without prediction.
+# Per-step actor obs: 115 + 6 = 121 dims.
+# With history_length=5: 121 x 5 = 605 dims total.
 
 obs:
   use_phase: True
@@ -21,7 +22,7 @@ obs:
       dof_pos,
       dof_vel,
       actions,
-      oracle_wrench,
+      current_wrench,
     ]
 
     critic_obs: [
@@ -61,11 +62,8 @@ obs:
     actions: 1.0,
     sin_phase: 1.0,
     cos_phase: 1.0,
-    left_ee_apply_force: 0.1,
-    right_ee_apply_force: 0.1,
     history_actor: 1.0,
-    oracle_wrench: 0.1,
-    current_wrench: 0.1,
+    current_wrench: 1.0,
   }
 
   add_noise: False
@@ -85,10 +83,7 @@ obs:
     actions: 0.0,
     sin_phase: 0.0,
     cos_phase: 0.0,
-    left_ee_apply_force: 0.0,
-    right_ee_apply_force: 0.0,
     history_actor: 0.0,
-    oracle_wrench: 0.0,
     current_wrench: 0.0,
   }
 
@@ -108,7 +103,4 @@ obs:
     - actions: ${robot.dof_obs_size}
     - sin_phase: 1
     - cos_phase: 1
-    - left_ee_apply_force: 3
-    - right_ee_apply_force: 3
-    - oracle_wrench: 30
     - current_wrench: 6

@@ -1,7 +1,12 @@
 # @package _global_
 #
-# Base obs config (B1 reactive / B2 extended history).
-# Critic uses current_wrench (shared privileged signal across ALL baselines).
+# AnticiPose B4b (direct plan — critic only) obs config.
+# arm_plan (70 dims) is in CRITIC obs only, NOT in actor obs.
+# Tests whether the actor needs anticipatory info, or just the value function.
+# Per-step actor obs: 115 dims (same as B1).
+# Per-step critic obs: 121 + 70 = 191 dims.
+# Actor with history_length=5: 115 x 5 = 575 dims total.
+
 obs:
   use_phase: True
   obs_dict:
@@ -18,8 +23,6 @@ obs:
       dof_pos,
       dof_vel,
       actions,
-      # sin_phase,
-      # cos_phase,
     ]
 
     critic_obs: [
@@ -37,8 +40,9 @@ obs:
       dof_vel,
       actions,
       current_wrench,
+      arm_plan,
     ]
-  
+
   history_length:
     actor_obs: 5
     critic_obs: 1
@@ -59,29 +63,12 @@ obs:
     actions: 1.0,
     sin_phase: 1.0,
     cos_phase: 1.0,
-    current_wrench: 1.0,
     history_actor: 1.0,
+    arm_plan: 1.0,
+    current_wrench: 1.0,
   }
-  
+
   add_noise: False
-  # noise_scales: {
-  #   base_lin_vel: 0.0,
-  #   base_ang_vel: 0.2,
-  #   projected_gravity: 0.05,
-  #   command_lin_vel: 0.0,
-  #   command_ang_vel: 0.0,
-  #   command_stand: 0.0,
-  #   command_base_height: 0.0,
-  #   ref_upper_dof_pos: 0.01,
-  #   dof_pos: 0.01,
-  #   dof_vel: 1.5, # 1.5
-  #   actions: 0.0,
-  #   sin_phase: 0.0,
-  #   cos_phase: 0.0,
-  #   phase_time: 0.0,
-  #   history_actor: 0.0,
-  #   history_critic: 0.0,
-  # }
   noise_scales: {
     base_orientation: 0.0,
     base_lin_vel: 0.0,
@@ -94,16 +81,15 @@ obs:
     command_base_height: 0.0,
     ref_upper_dof_pos: 0.0,
     dof_pos: 0.01,
-    dof_vel: 0.1, # 1.5
+    dof_vel: 0.1,
     actions: 0.0,
     sin_phase: 0.0,
     cos_phase: 0.0,
-    current_wrench: 0.0,
     history_actor: 0.0,
+    arm_plan: 0.0,
+    current_wrench: 0.0,
   }
 
-  # obs_dims should use list instead of dict
-  # will be converted to dict in `pre_process_config`
   obs_dims:
     - base_orientation: 4
     - base_lin_vel: 3
@@ -114,10 +100,11 @@ obs:
     - command_stand: 1
     - command_waist_dofs: 3
     - command_base_height: 1
-    - ref_upper_dof_pos: ${robot.upper_body_actions_dim} # upper body actions
+    - ref_upper_dof_pos: ${robot.upper_body_actions_dim}
     - dof_pos: ${robot.dof_obs_size}
     - dof_vel: ${robot.dof_obs_size}
-    - actions: ${robot.dof_obs_size} # wbc body actions
+    - actions: ${robot.dof_obs_size}
     - sin_phase: 1
     - cos_phase: 1
+    - arm_plan: 70
     - current_wrench: 6

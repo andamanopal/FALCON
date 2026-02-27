@@ -1,52 +1,52 @@
 # ============================================================================
-# AnticiPose Makefile
+# AnticiPose Makefile — Single source of truth for all experiments
 # ============================================================================
 #
-# Training (launches 4 tmux panes, one per baseline):
-#   make train-all SEED=42
-#   make train-all SEED=42 NUM_ITERS=3000 NUM_ENVS=8192
+# Baselines (ablation ladder):
+#   B1   Reactive (FALCON)       — no extra obs
+#   B2   Extended History         — 10-step obs history (vs 5)
+#   B3   Current Wrench           — 6-dim current wrench in actor obs
+#   B4a  Direct Plan (Actor)      — 70-dim arm plan in actor obs
+#   B4b  Direct Plan (Critic)     — 70-dim arm plan in critic only
+#   B5   AnticiPose (ours)        — 30-dim predicted future wrench
+#   B6   CVAE Latent              — 30-dim CVAE latent encoding of arm plan
 #
-# Train individual baselines:
-#   make train-b1 SEED=42
-#   make train-b2 SEED=42
-#   make train-b5 SEED=42  (requires predictor trained first)
-#   make train-b4a SEED=42
-#
-# Full sequential pipeline on 1 GPU (B1 -> collect -> predictor -> B2 -> B5 -> B4a -> eval):
+# Quick iteration (1 seed, sequential):
 #   make train-pipeline SEED=42
+#   make train-pipeline SEED=42 NUM_ITERS=3000 NUM_ENVS=8192
 #
-# Evaluation:
-#   make eval-all SEED=35 NUM_EPISODES=500
-#   make eval-b1 SEED=35 NUM_EPISODES=500
+# Individual targets:
+#   make train-b1 SEED=42
+#   make train-b5 SEED=42
+#   make eval-all SEED=42
 #
-# Sync WandB:
-#   make sync-wandb SEED=35
-#
-# Collect results:
-#   make results SEED=35
+# Multi-seed final run:
+#   for S in 35 42 123 456; do make train-pipeline SEED=$S; done
 # ============================================================================
 
 # ---------------------------------------------------------------------------
-# Config
+# Config (override on command line: make train-pipeline SEED=35 NUM_ITERS=5000)
 # ---------------------------------------------------------------------------
-SEED          ?= 42
-NUM_ENVS      ?= 8192
-NUM_ITERS     ?= 3000
-NUM_EPISODES  ?= 500
-MAX_EP_LEN_S  ?= 20
-EVAL_NUM_ENVS ?= 64
-OUTPUT_DIR    ?= logs_eval
-LOG_DIR       ?= logs
-PROJECT       ?= anticipose_overnight
-PRED_EPOCHS   ?= 100
-PRED_BATCH    ?= 4096
-PRED_PATIENCE ?= 10
+SEED            ?= 42
+NUM_ENVS        ?= 8192
+NUM_ITERS       ?= 3000
+NUM_EPISODES    ?= 500
+MAX_EP_LEN_S    ?= 20
+EVAL_NUM_ENVS   ?= 64
+OUTPUT_DIR      ?= logs_eval
+LOG_DIR         ?= logs
+PROJECT         ?= anticipose_overnight
+PRED_EPOCHS     ?= 100
+PRED_BATCH      ?= 4096
+PRED_PATIENCE   ?= 10
 COLLECT_SAMPLES ?= 500000
 VENV            ?= /workspace/AnticiPose/.venv/bin/activate
 
 # Derived paths
-PRED_CKPT     = $(LOG_DIR)/$(PROJECT)/wrench_predictor_seed$(SEED).pt
-WRENCH_DATA   = $(LOG_DIR)/$(PROJECT)/wrench_data_seed$(SEED).pt
+PRED_CKPT         = $(LOG_DIR)/$(PROJECT)/wrench_predictor_seed$(SEED).pt
+CVAE_CKPT         = $(LOG_DIR)/$(PROJECT)/arm_plan_cvae_seed$(SEED).pt
+WRENCH_DATA       = $(LOG_DIR)/$(PROJECT)/wrench_data_seed$(SEED).pt
+PIPELINE_PROGRESS = $(LOG_DIR)/$(PROJECT)/pipeline_progress_seed$(SEED).txt
 
 # Training command
 TRAIN_CMD = python humanoidverse/train_agent.py +exp=anticipose
@@ -65,11 +65,14 @@ COMMON = +simulator=isaacgym \
          wandb.wandb_entity=andaman-l \
          wandb.wandb_project=AnticiPose
 
-# Obs configs per mode
-OBS_BASE        = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma
-OBS_ORACLE      = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_oracle
-OBS_ANTICIPOSE  = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
-OBS_DIRECT_PLAN = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
+# Obs configs per baseline
+OBS_BASE          = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma
+OBS_EXTENDED_HIST = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_extended_history
+OBS_CURRENT_WR    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_current_wrench
+OBS_DIRECT_PLAN   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
+OBS_DIRECT_CRIT   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_critic
+OBS_ANTICIPOSE    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
+OBS_CVAE          = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_cvae
 
 # Eval command
 EVAL_CMD = python scripts/eval_baselines.py
@@ -84,204 +87,19 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 
 .DEFAULT_GOAL := help
 
-.PHONY: help train-all train-b1 train-b2 train-b5 train-b4a train-pipeline
-.PHONY: collect-wrench train-predictor
-.PHONY: eval-all eval-b1 eval-b2 eval-b5 eval-b4a
+.PHONY: help
+.PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b6
+.PHONY: train-pipeline train-pipeline-tmux pipeline-status pipeline-resume
+.PHONY: collect-wrench train-predictor train-cvae
+.PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b6
+.PHONY: smoke-test
 .PHONY: sync-wandb results
 
 # ============================================================================
-# TRAINING TARGETS
+# INDIVIDUAL TRAINING TARGETS
 # ============================================================================
 
-## train-all: Launch all 4 baselines in separate tmux sessions
-##   NOTE: B5 requires a pre-trained predictor. If PRED_CKPT doesn't exist,
-##   B5 session will error and remind you to run `make train-pipeline` instead.
-train-all:
-	@echo "==> Launching 4 training sessions (seed=$(SEED))"
-	@tmux new-session -d -s B1_train \
-		'source $(VENV) && \
-		 echo "=== B1 reactive (seed=$(SEED)) ===" && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_BASE) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B1_reactive_seed$(SEED) \
-		   env.config.anticipose_mode=reactive \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 echo "B1 DONE" ; exec bash'
-	@tmux new-session -d -s B2_train \
-		'source $(VENV) && \
-		 echo "=== B2 oracle (seed=$(SEED)) ===" && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_ORACLE) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B2_oracle_seed$(SEED) \
-		   env.config.anticipose_mode=oracle \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 echo "B2 DONE" ; exec bash'
-	@tmux new-session -d -s B4a_train \
-		'source $(VENV) && \
-		 echo "=== B4a direct_plan (seed=$(SEED)) ===" && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_DIRECT_PLAN) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B4a_direct_plan_seed$(SEED) \
-		   env.config.anticipose_mode=direct_plan \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 echo "B4a DONE" ; exec bash'
-	@if [ -f "$(PRED_CKPT)" ]; then \
-	  tmux new-session -d -s B5_train \
-		'source $(VENV) && \
-		 echo "=== B5 anticipose (seed=$(SEED)) ===" && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B5_anticipose_seed$(SEED) \
-		   env.config.anticipose_mode=anticipose \
-		   ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 echo "B5 DONE" ; exec bash' ; \
-	else \
-	  echo "WARNING: Predictor not found at $(PRED_CKPT) -- skipping B5" ; \
-	  echo "  Run: make train-pipeline SEED=$(SEED)" ; \
-	fi
-	@echo "==> Sessions created: B1_train, B2_train, B4a_train, B5_train"
-	@echo "==> Attach with: tmux attach -t B1_train  (or B2_train, B4a_train, B5_train)"
-	@echo "==> List all:    tmux ls"
-
-## train-pipeline: Full sequential pipeline in one tmux session (like run_overnight.sh)
-##   B1 -> collect -> predictor -> B2 -> B5 -> B4a -> eval (all sequential, 1 GPU)
-train-pipeline:
-	@echo "==> Pipeline: B1 -> collect -> predictor -> B2 -> B5 -> B4a -> eval (seed=$(SEED))"
-	@tmux kill-session -t pipeline_s$(SEED) 2>/dev/null || true
-	@tmux new-session -d -s pipeline_s$(SEED) \
-		'source $(VENV) && \
-		 echo "=== FULL PIPELINE (seed=$(SEED), $(NUM_ITERS) iters, $(NUM_ENVS) envs) ===" && \
-		 echo "" && \
-		 echo "[Stage 1/7] Training B1 reactive..." && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_BASE) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B1_reactive_seed$(SEED) \
-		   env.config.anticipose_mode=reactive \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 B1_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B1_reactive_seed$(SEED)* | head -1) && \
-		 echo "[Stage 1] B1 done: $${B1_DIR}" && \
-		 python scripts/sync_wandb.py $${B1_DIR} B1_reactive_seed$(SEED) && \
-		 echo "" && \
-		 echo "[Stage 2/7] Collecting wrench data..." && \
-		 python scripts/collect_wrench_data.py \
-		   +exp=anticipose $(COMMON) $(OBS_BASE) \
-		   project_name=$(PROJECT) \
-		   experiment_name=collect_wrench_seed$(SEED) \
-		   env.config.anticipose_mode=reactive \
-		   env.config.collect_wrench_data=true \
-		   env.config.collect_buffer_size=$(COLLECT_SAMPLES) \
-		   checkpoint=$${B1_DIR}/model_$(NUM_ITERS).pt \
-		   +output_path=$(WRENCH_DATA) \
-		   +num_samples=$(COLLECT_SAMPLES) \
-		   headless=true && \
-		 echo "[Stage 2] Wrench data: $(WRENCH_DATA)" && \
-		 echo "" && \
-		 echo "[Stage 3/7] Training wrench predictor..." && \
-		 python scripts/train_wrench_predictor.py \
-		   --data_path $(WRENCH_DATA) \
-		   --save_path $(PRED_CKPT) \
-		   --epochs $(PRED_EPOCHS) \
-		   --batch_size $(PRED_BATCH) \
-		   --patience $(PRED_PATIENCE) \
-		   --device cuda && \
-		 echo "[Stage 3] Predictor: $(PRED_CKPT)" && \
-		 echo "" && \
-		 echo "[Stage 4/7] Training B2 oracle..." && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_ORACLE) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B2_oracle_seed$(SEED) \
-		   env.config.anticipose_mode=oracle \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 B2_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B2_oracle_seed$(SEED)* | head -1) && \
-		 python scripts/sync_wandb.py $${B2_DIR} B2_oracle_seed$(SEED) && \
-		 echo "" && \
-		 echo "[Stage 5/7] Training B5 anticipose..." && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B5_anticipose_seed$(SEED) \
-		   env.config.anticipose_mode=anticipose \
-		   ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 B5_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5_anticipose_seed$(SEED)* | head -1) && \
-		 python scripts/sync_wandb.py $${B5_DIR} B5_anticipose_seed$(SEED) && \
-		 echo "" && \
-		 echo "[Stage 6/7] Training B4a direct_plan..." && \
-		 $(TRAIN_CMD) $(COMMON) $(OBS_DIRECT_PLAN) \
-		   project_name=$(PROJECT) \
-		   experiment_name=B4a_direct_plan_seed$(SEED) \
-		   env.config.anticipose_mode=direct_plan \
-		   algo.config.num_learning_iterations=$(NUM_ITERS) && \
-		 B4A_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B4a_direct_plan_seed$(SEED)* | head -1) && \
-		 python scripts/sync_wandb.py $${B4A_DIR} B4a_direct_plan_seed$(SEED) && \
-		 echo "" && \
-		 echo "[Stage 7/7] Evaluating all baselines ($(NUM_EPISODES) episodes)..." && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B1_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B1_reactive_train_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task random \
-		   --output_dir $(OUTPUT_DIR) && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B1_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B1_reactive_heldout_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task lateral_slam_down \
-		   --output_dir $(OUTPUT_DIR) && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B2_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B2_oracle_train_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task random \
-		   --output_dir $(OUTPUT_DIR) && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B2_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B2_oracle_heldout_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task lateral_slam_down \
-		   --output_dir $(OUTPUT_DIR) && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B5_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B5_anticipose_train_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task random \
-		   --wrench_predictor_ckpt $(PRED_CKPT) \
-		   --output_dir $(OUTPUT_DIR) && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B5_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B5_anticipose_heldout_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task lateral_slam_down \
-		   --wrench_predictor_ckpt $(PRED_CKPT) \
-		   --output_dir $(OUTPUT_DIR) && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B4A_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B4a_direct_plan_train_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task random \
-		   --output_dir $(OUTPUT_DIR) && \
-		 python scripts/eval_baselines.py \
-		   --checkpoint $${B4A_DIR}/model_$(NUM_ITERS).pt \
-		   --eval_name eval_B4a_direct_plan_heldout_s$(SEED) \
-		   --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
-		   --max_episode_length_s $(MAX_EP_LEN_S) \
-		   --arm_trajectory_task lateral_slam_down \
-		   --output_dir $(OUTPUT_DIR) && \
-		 echo "" && \
-		 echo "========================================" && \
-		 echo "  ALL DONE (seed=$(SEED))" && \
-		 echo "========================================" ; exec bash'
-	@echo "==> tmux session pipeline_s$(SEED) created"
-	@echo "==> Attach with: tmux attach -t pipeline_s$(SEED)"
-
-## train-b1: Train B1 reactive only
+## train-b1: Train B1 reactive baseline
 train-b1:
 	$(TRAIN_CMD) $(COMMON) $(OBS_BASE) \
 	  project_name=$(PROJECT) \
@@ -289,25 +107,23 @@ train-b1:
 	  env.config.anticipose_mode=reactive \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
 
-## train-b2: Train B2 oracle only
+## train-b2: Train B2 extended history (10-step)
 train-b2:
-	$(TRAIN_CMD) $(COMMON) $(OBS_ORACLE) \
+	$(TRAIN_CMD) $(COMMON) $(OBS_EXTENDED_HIST) \
 	  project_name=$(PROJECT) \
-	  experiment_name=B2_oracle_seed$(SEED) \
-	  env.config.anticipose_mode=oracle \
+	  experiment_name=B2_extended_history_seed$(SEED) \
+	  env.config.anticipose_mode=reactive \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
 
-## train-b5: Train B5 anticipose only (requires PRED_CKPT)
-train-b5:
-	@test -f "$(PRED_CKPT)" || (echo "ERROR: Predictor not found at $(PRED_CKPT). Run make train-pipeline first." && exit 1)
-	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE) \
+## train-b3: Train B3 current wrench
+train-b3:
+	$(TRAIN_CMD) $(COMMON) $(OBS_CURRENT_WR) \
 	  project_name=$(PROJECT) \
-	  experiment_name=B5_anticipose_seed$(SEED) \
-	  env.config.anticipose_mode=anticipose \
-	  ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
+	  experiment_name=B3_current_wrench_seed$(SEED) \
+	  env.config.anticipose_mode=reactive \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
 
-## train-b4a: Train B4a direct_plan only
+## train-b4a: Train B4a direct plan (actor)
 train-b4a:
 	$(TRAIN_CMD) $(COMMON) $(OBS_DIRECT_PLAN) \
 	  project_name=$(PROJECT) \
@@ -315,7 +131,39 @@ train-b4a:
 	  env.config.anticipose_mode=direct_plan \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
 
-## collect-wrench: Collect wrench data from B1 checkpoint
+## train-b4b: Train B4b direct plan (critic only)
+train-b4b:
+	$(TRAIN_CMD) $(COMMON) $(OBS_DIRECT_CRIT) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B4b_direct_plan_critic_seed$(SEED) \
+	  env.config.anticipose_mode=direct_plan \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## train-b5: Train B5 anticipose (requires predictor checkpoint)
+train-b5:
+	@test -f "$(PRED_CKPT)" || (echo "ERROR: Predictor not found at $(PRED_CKPT). Run: make collect-wrench && make train-predictor" && exit 1)
+	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B5_anticipose_seed$(SEED) \
+	  env.config.anticipose_mode=anticipose \
+	  ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## train-b6: Train B6 CVAE latent (requires CVAE checkpoint)
+train-b6:
+	@test -f "$(CVAE_CKPT)" || (echo "ERROR: CVAE not found at $(CVAE_CKPT). Run: make train-cvae" && exit 1)
+	$(TRAIN_CMD) $(COMMON) $(OBS_CVAE) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B6_cvae_seed$(SEED) \
+	  env.config.anticipose_mode=cvae \
+	  ++env.config.cvae_ckpt=$(CVAE_CKPT) \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+# ============================================================================
+# DATA COLLECTION & PREDICTOR
+# ============================================================================
+
+## collect-wrench: Collect wrench supervision data from trained B1 checkpoint
 collect-wrench:
 	@B1_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B1_reactive_seed$(SEED)* | head -1) && \
 	echo "Using B1 checkpoint: $${B1_DIR}/model_$(NUM_ITERS).pt" && \
@@ -331,9 +179,9 @@ collect-wrench:
 	  +num_samples=$(COLLECT_SAMPLES) \
 	  headless=true
 
-## train-predictor: Train wrench predictor from collected data
+## train-predictor: Train wrench predictor MLP from collected data
 train-predictor:
-	@test -f "$(WRENCH_DATA)" || (echo "ERROR: Wrench data not found at $(WRENCH_DATA). Run make collect-wrench first." && exit 1)
+	@test -f "$(WRENCH_DATA)" || (echo "ERROR: Wrench data not found at $(WRENCH_DATA). Run: make collect-wrench" && exit 1)
 	python scripts/train_wrench_predictor.py \
 	  --data_path $(WRENCH_DATA) \
 	  --save_path $(PRED_CKPT) \
@@ -342,66 +190,258 @@ train-predictor:
 	  --patience $(PRED_PATIENCE) \
 	  --device cuda
 
+## train-cvae: Train CVAE arm plan encoder from collected data
+train-cvae:
+	@test -f "$(WRENCH_DATA)" || (echo "ERROR: Wrench data not found at $(WRENCH_DATA). Run: make collect-wrench" && exit 1)
+	python scripts/train_arm_plan_cvae.py \
+	  --data_path $(WRENCH_DATA) \
+	  --save_path $(CVAE_CKPT) \
+	  --epochs $(PRED_EPOCHS) \
+	  --batch_size $(PRED_BATCH) \
+	  --patience $(PRED_PATIENCE) \
+	  --device cuda
+
+# ============================================================================
+# FULL SEQUENTIAL PIPELINE (1 GPU, overnight)
+# ============================================================================
+
+PIPELINE_TOTAL = 11
+
+# Shell helper: maps step number to "target label"
+# Used by train-pipeline, pipeline-resume, and pipeline-status
+define PIPELINE_STEP_FUNC
+step_target() { \
+	case $$1 in \
+		1)  echo "train-b1";; \
+		2)  echo "collect-wrench";; \
+		3)  echo "train-predictor";; \
+		4)  echo "train-cvae";; \
+		5)  echo "train-b2";; \
+		6)  echo "train-b3";; \
+		7)  echo "train-b4a";; \
+		8)  echo "train-b4b";; \
+		9)  echo "train-b5";; \
+		10) echo "train-b6";; \
+		11) echo "eval-all";; \
+	esac; \
+}; \
+step_label() { \
+	case $$1 in \
+		1)  echo "B1 reactive";; \
+		2)  echo "Collect wrench data";; \
+		3)  echo "Wrench predictor";; \
+		4)  echo "CVAE encoder";; \
+		5)  echo "B2 extended history";; \
+		6)  echo "B3 current wrench";; \
+		7)  echo "B4a direct plan";; \
+		8)  echo "B4b direct plan critic";; \
+		9)  echo "B5 anticipose";; \
+		10) echo "B6 CVAE latent";; \
+		11) echo "Evaluate all";; \
+	esac; \
+}
+endef
+
+## train-pipeline: Run full pipeline sequentially (B1 -> collect -> predictor/cvae -> B2-B6 -> eval)
+train-pipeline:
+	@$(PIPELINE_STEP_FUNC); \
+	echo "=== FULL PIPELINE (seed=$(SEED), $(NUM_ITERS) iters, $(NUM_ENVS) envs) ==="; \
+	mkdir -p $$(dirname $(PIPELINE_PROGRESS)); \
+	echo 0 > $(PIPELINE_PROGRESS); \
+	STEP=1; \
+	while [ "$$STEP" -le $(PIPELINE_TOTAL) ]; do \
+		TARGET=$$(step_target $$STEP); \
+		LABEL=$$(step_label $$STEP); \
+		echo ""; \
+		echo "[$$STEP/$(PIPELINE_TOTAL)] $$LABEL..."; \
+		$(MAKE) --no-print-directory $$TARGET SEED=$(SEED) || exit 1; \
+		echo $$STEP > $(PIPELINE_PROGRESS); \
+		STEP=$$((STEP + 1)); \
+	done; \
+	echo ""; \
+	echo "========================================"; \
+	echo "  ALL DONE (seed=$(SEED))"; \
+	echo "========================================"; \
+	rm -f $(PIPELINE_PROGRESS)
+
+## pipeline-resume: Resume pipeline from last completed step
+pipeline-resume:
+	@$(PIPELINE_STEP_FUNC); \
+	if [ -f "$(PIPELINE_PROGRESS)" ]; then \
+		DONE=$$(cat $(PIPELINE_PROGRESS)); \
+		echo "=== RESUMING PIPELINE (seed=$(SEED), last completed: step $$DONE/$(PIPELINE_TOTAL)) ==="; \
+	else \
+		DONE=0; \
+		echo "=== No progress file found — starting full pipeline (seed=$(SEED)) ==="; \
+	fi; \
+	mkdir -p $$(dirname $(PIPELINE_PROGRESS)); \
+	if [ ! -f "$(PIPELINE_PROGRESS)" ]; then echo 0 > $(PIPELINE_PROGRESS); fi; \
+	STEP=1; \
+	while [ "$$STEP" -le $(PIPELINE_TOTAL) ]; do \
+		TARGET=$$(step_target $$STEP); \
+		LABEL=$$(step_label $$STEP); \
+		if [ "$$STEP" -le "$$DONE" ]; then \
+			echo "[$$STEP/$(PIPELINE_TOTAL)] $$LABEL — skipped (already done)"; \
+			STEP=$$((STEP + 1)); \
+			continue; \
+		fi; \
+		echo ""; \
+		echo "[$$STEP/$(PIPELINE_TOTAL)] $$LABEL..."; \
+		$(MAKE) --no-print-directory $$TARGET SEED=$(SEED) || exit 1; \
+		echo $$STEP > $(PIPELINE_PROGRESS); \
+		STEP=$$((STEP + 1)); \
+	done; \
+	echo ""; \
+	echo "========================================"; \
+	echo "  ALL DONE (seed=$(SEED))"; \
+	echo "========================================"; \
+	rm -f $(PIPELINE_PROGRESS)
+
+## pipeline-status: Show pipeline progress for a seed
+pipeline-status:
+	@$(PIPELINE_STEP_FUNC); \
+	if [ ! -f "$(PIPELINE_PROGRESS)" ]; then \
+		echo "No pipeline in progress for seed $(SEED)."; \
+		exit 0; \
+	fi; \
+	DONE=$$(cat $(PIPELINE_PROGRESS)); \
+	if [ "$$DONE" -ge $(PIPELINE_TOTAL) ]; then \
+		echo "Pipeline complete for seed $(SEED) (all $(PIPELINE_TOTAL) steps done)."; \
+		exit 0; \
+	fi; \
+	DONE_LABEL=$$(step_label $$DONE); \
+	NEXT=$$((DONE + 1)); \
+	NEXT_LABEL=$$(step_label $$NEXT); \
+	echo "Pipeline status (seed=$(SEED)):"; \
+	echo "  Last completed: [$$DONE/$(PIPELINE_TOTAL)] $$DONE_LABEL"; \
+	echo "  Next step:      [$$NEXT/$(PIPELINE_TOTAL)] $$NEXT_LABEL"; \
+	echo ""; \
+	echo "Resume with: make pipeline-resume SEED=$(SEED)"
+
+## train-pipeline-tmux: Same as train-pipeline but in a detached tmux session
+train-pipeline-tmux:
+	@tmux kill-session -t pipeline_s$(SEED) 2>/dev/null || true
+	@tmux new-session -d -s pipeline_s$(SEED) \
+		'source $(VENV) && make train-pipeline SEED=$(SEED) NUM_ITERS=$(NUM_ITERS) NUM_ENVS=$(NUM_ENVS) 2>&1 | tee logs/pipeline_seed$(SEED).log ; exec bash'
+	@echo "==> tmux session: pipeline_s$(SEED)"
+	@echo "==> Attach:  tmux attach -t pipeline_s$(SEED)"
+	@echo "==> Log:     tail -f logs/pipeline_seed$(SEED).log"
+
 # ============================================================================
 # EVALUATION TARGETS
 # ============================================================================
 
-## eval-all: Evaluate all 4 baselines on train + held-out tasks (8 runs)
-eval-all: eval-b1 eval-b2 eval-b5 eval-b4a
+## eval-all: Evaluate all 7 baselines on train + held-out tasks
+eval-all: eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b6
 	@echo ""
 	@echo "========================================"
 	@echo "  ALL EVALUATIONS COMPLETE (seed=$(SEED))"
 	@echo "========================================"
 	@$(MAKE) --no-print-directory results SEED=$(SEED)
 
-## eval-b1: Evaluate B1 reactive (train + held-out)
+## eval-b1: Evaluate B1 reactive
 eval-b1:
-	@B1_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B1_reactive_seed$(SEED)* | head -1) && \
+	@B1_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B1_reactive_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B1_DIR" ]; then echo "SKIP: B1 not found for seed $(SEED)"; exit 0; fi && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B1_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B1_reactive_train_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
 	  --output_dir $(OUTPUT_DIR) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B1_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B1_reactive_heldout_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
 	  --output_dir $(OUTPUT_DIR)
 
-## eval-b2: Evaluate B2 oracle (train + held-out)
+## eval-b2: Evaluate B2 extended history
 eval-b2:
-	@B2_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B2_oracle_seed$(SEED)* | head -1) && \
+	@B2_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B2_extended_history_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B2_DIR" ]; then echo "SKIP: B2 not found for seed $(SEED)"; exit 0; fi && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B2_DIR}/model_$(NUM_ITERS).pt \
-	  --eval_name eval_B2_oracle_train_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --eval_name eval_B2_extended_history_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
 	  --output_dir $(OUTPUT_DIR) && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B2_DIR}/model_$(NUM_ITERS).pt \
-	  --eval_name eval_B2_oracle_heldout_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --eval_name eval_B2_extended_history_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
 	  --output_dir $(OUTPUT_DIR)
 
-## eval-b5: Evaluate B5 anticipose (train + held-out)
+## eval-b3: Evaluate B3 current wrench
+eval-b3:
+	@B3_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B3_current_wrench_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B3_DIR" ]; then echo "SKIP: B3 not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B3_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B3_current_wrench_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --output_dir $(OUTPUT_DIR) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B3_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B3_current_wrench_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --output_dir $(OUTPUT_DIR)
+
+## eval-b4a: Evaluate B4a direct plan (actor)
+eval-b4a:
+	@B4A_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B4a_direct_plan_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B4A_DIR" ]; then echo "SKIP: B4a not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B4A_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B4a_direct_plan_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --output_dir $(OUTPUT_DIR) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B4A_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B4a_direct_plan_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --output_dir $(OUTPUT_DIR)
+
+## eval-b4b: Evaluate B4b direct plan (critic only)
+eval-b4b:
+	@B4B_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B4b_direct_plan_critic_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B4B_DIR" ]; then echo "SKIP: B4b not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B4B_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B4b_direct_plan_critic_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --output_dir $(OUTPUT_DIR) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B4B_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B4b_direct_plan_critic_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --output_dir $(OUTPUT_DIR)
+
+## eval-b5: Evaluate B5 anticipose
 eval-b5:
-	@B5_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5_anticipose_seed$(SEED)* | head -1) && \
+	@B5_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5_anticipose_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B5_DIR" ]; then echo "SKIP: B5 not found for seed $(SEED)"; exit 0; fi && \
 	$(EVAL_CMD) \
 	  --checkpoint $${B5_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B5_anticipose_train_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
 	  --wrench_predictor_ckpt $(PRED_CKPT) \
@@ -409,64 +449,69 @@ eval-b5:
 	$(EVAL_CMD) \
 	  --checkpoint $${B5_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B5_anticipose_heldout_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
 	  --wrench_predictor_ckpt $(PRED_CKPT) \
 	  --output_dir $(OUTPUT_DIR)
 
-## eval-b4a: Evaluate B4a direct_plan (train + held-out)
-eval-b4a:
-	@B4A_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B4a_direct_plan_seed$(SEED)* | head -1) && \
+## eval-b6: Evaluate B6 CVAE latent
+eval-b6:
+	@B6_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B6_cvae_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B6_DIR" ]; then echo "SKIP: B6 not found for seed $(SEED)"; exit 0; fi && \
 	$(EVAL_CMD) \
-	  --checkpoint $${B4A_DIR}/model_$(NUM_ITERS).pt \
-	  --eval_name eval_B4a_direct_plan_train_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --checkpoint $${B6_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B6_cvae_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task random \
+	  --cvae_ckpt $(CVAE_CKPT) \
 	  --output_dir $(OUTPUT_DIR) && \
 	$(EVAL_CMD) \
-	  --checkpoint $${B4A_DIR}/model_$(NUM_ITERS).pt \
-	  --eval_name eval_B4a_direct_plan_heldout_s$(SEED) \
-	  --num_episodes $(NUM_EPISODES) \
-	  --num_envs $(EVAL_NUM_ENVS) \
+	  --checkpoint $${B6_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B6_cvae_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
+	  --cvae_ckpt $(CVAE_CKPT) \
 	  --output_dir $(OUTPUT_DIR)
 
 # ============================================================================
 # UTILITIES
 # ============================================================================
 
-## sync-wandb: Re-log TensorBoard data to WandB for all baselines of a seed
+## smoke-test: Run full pipeline with minimal settings to catch config/import errors
+smoke-test:
+	$(MAKE) train-pipeline SEED=$(SEED) \
+	  NUM_ITERS=2 NUM_ENVS=4 NUM_EPISODES=2 \
+	  EVAL_NUM_ENVS=4 COLLECT_SAMPLES=100 \
+	  PRED_EPOCHS=2 PRED_BATCH=32 PRED_PATIENCE=1 \
+	  PROJECT=anticipose_smoke_test
+
+## sync-wandb: Re-log TensorBoard data to WandB for all baselines
 sync-wandb:
-	@for mode in B1_reactive B2_oracle B5_anticipose B4a_direct_plan; do \
+	@for mode in B1_reactive B2_extended_history B3_current_wrench B4a_direct_plan B4b_direct_plan_critic B5_anticipose B6_cvae; do \
 	  DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*$${mode}_seed$(SEED)* 2>/dev/null | head -1) ; \
 	  if [ -n "$$DIR" ]; then \
 	    python scripts/sync_wandb.py "$$DIR" "$${mode}_seed$(SEED)" ; \
 	  fi ; \
 	done
 
-## results: Print all eval results for a seed as a table
+## results: Print eval results table for a seed
 results:
 	@echo ""
 	@echo "=== Eval Results (seed=$(SEED)) ==="
 	@echo ""
-	@printf "%-35s %12s %12s %12s\n" "Eval Name" "Mean Reward" "Mean EpLen" "Survival%"
-	@printf "%-35s %12s %12s %12s\n" "-----------------------------------" "------------" "------------" "------------"
+	@printf "%-45s %12s %12s %12s\n" "Eval Name" "Mean Reward" "Mean EpLen" "Survival%"
+	@printf "%-45s %12s %12s %12s\n" "---------------------------------------------" "------------" "------------" "------------"
 	@for f in $(OUTPUT_DIR)/eval_*_s$(SEED)/results.json; do \
 	  if [ -f "$$f" ]; then \
-	    python -c " \
-import json, sys; \
-d = json.load(open('$$f')); \
-print(f\"{d['eval_name']:<35s} {d['mean_reward']:>12.2f} {d['mean_episode_length']:>12.1f} {d['survival_rate']*100:>11.1f}%\")" ; \
+	    python -c "import json, sys; d = json.load(open('$$f')); print(f\"{d['eval_name']:<45s} {d['mean_reward']:>12.2f} {d['mean_episode_length']:>12.1f} {d['survival_rate']*100:>11.1f}%\")" ; \
 	  fi ; \
 	done
 	@echo ""
 
-## help: Show available targets
+## help: Show available targets and usage
 help:
 	@echo "AnticiPose Makefile"
 	@echo ""
@@ -475,5 +520,18 @@ help:
 	@echo "Variables (with defaults):"
 	@echo "  SEED=$(SEED)  NUM_ENVS=$(NUM_ENVS)  NUM_ITERS=$(NUM_ITERS)"
 	@echo "  NUM_EPISODES=$(NUM_EPISODES)  MAX_EP_LEN_S=$(MAX_EP_LEN_S)  EVAL_NUM_ENVS=$(EVAL_NUM_ENVS)"
+	@echo ""
+	@echo "Baselines:"
+	@echo "  B1   Reactive (FALCON)         B2   Extended History (10-step)"
+	@echo "  B3   Current Wrench            B4a  Direct Plan (Actor)"
+	@echo "  B4b  Direct Plan (Critic)      B5   AnticiPose (ours)"
+	@echo "  B6   CVAE Latent"
+	@echo ""
+	@echo "Quick verification:"
+	@echo "  make smoke-test SEED=42            # Full pipeline, tiny settings (~minutes)"
+	@echo ""
+	@echo "Pipeline checkpoint/resume:"
+	@echo "  make pipeline-status SEED=42    # Check where pipeline left off"
+	@echo "  make pipeline-resume SEED=42    # Resume from last completed step"
 	@echo ""
 	@grep -E '^##' Makefile | sed 's/^## /  /'

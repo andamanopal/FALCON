@@ -6,10 +6,19 @@ Uses FALCON's YAML-driven observation dispatch so that:
   - Adding/removing obs components is just a YAML change
 
 Observation getters (FALCON dispatches _get_obs_<name>() automatically):
-  _get_obs_oracle_wrench     -> (N, H*6=30)  GT future wrenches (B2)
   _get_obs_predicted_wrench  -> (N, H*6=30)  Predicted wrenches (B5)
-  _get_obs_arm_plan          -> (N, H*14=70) Raw arm plan (B4a)
-  _get_obs_current_wrench    -> (N, 6)       Current wrench (critic)
+  _get_obs_arm_plan          -> (N, H*14=70) Raw arm plan (B4a/B4b)
+  _get_obs_current_wrench    -> (N, 6)       Current wrench (B3/critic)
+  _get_obs_cvae_latent       -> (N, 30)      CVAE latent (B6)
+
+Baselines (ablation ladder):
+  B1   Reactive          — unmodified FALCON (no extra obs)
+  B2   Extended History  — 10-step obs history (vs 5)
+  B3   Current Wrench    — 6-dim current wrench in actor obs
+  B4a  Direct Plan (Actor)  — 70-dim arm plan in actor obs
+  B4b  Direct Plan (Critic) — 70-dim arm plan in critic only
+  B5   AnticiPose        — 30-dim predicted future wrench (OUR METHOD)
+  B6   CVAE Latent       — 30-dim CVAE latent encoding of arm plan
 
 Hierarchy:
   BaseTask -> LeggedRobotBase -> LeggedRobotLocomotion
@@ -58,17 +67,20 @@ _RIGHT_ARM_BODY_NAMES = [
 class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
     """AnticiPose locomotion environment.
 
-    Adds scripted arm trajectories and wrench-aware observations on top of
-    FALCON's decoupled WBC force environment.  All AnticiPose-specific logic
-    is confined to hook overrides --- no parent method is copy-pasted.
+    Adds scripted arm trajectories, payload simulation, and wrench-aware
+    observations on top of FALCON's decoupled WBC force environment.
+    All AnticiPose-specific logic is confined to hook overrides --- no parent
+    method is copy-pasted.
 
     Config keys under ``config.env.config``:
-        anticipose_mode (str): "reactive" | "oracle" | "direct_plan" | "anticipose"
+        anticipose_mode (str): "reactive" | "direct_plan" | "anticipose" | "cvae"
         anticipose_horizon (int): H, default 5.
         arm_trajectory_task (str): Task type for trajectory generator.
         collect_wrench_data (bool): Whether to collect supervision data.
         collect_buffer_size (int): Ring buffer capacity for data collection.
         wrench_predictor_ckpt (str | None): Path to frozen predictor checkpoint.
+        cvae_ckpt (str | None): Path to frozen CVAE encoder checkpoint.
+        max_payload_mass (float): Max payload mass in kg (randomized per env).
     """
 
     def __init__(self, config, device):
@@ -81,12 +93,15 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         self._ap_mode: str = getattr(config, "anticipose_mode", "reactive")
         self._ap_horizon: int = getattr(config, "anticipose_horizon", 5)
         self._ap_collect: bool = getattr(config, "collect_wrench_data", False)
+        self._max_payload_mass: float = getattr(
+            config, "max_payload_mass", 0.0,
+        )
 
         assert self._ap_mode in {
-            "reactive", "oracle", "direct_plan", "anticipose"
+            "reactive", "direct_plan", "anticipose", "cvae"
         }, (
             f"Unknown anticipose_mode: {self._ap_mode!r}. "
-            "Choose from: reactive, oracle, direct_plan, anticipose."
+            "Choose from: reactive, direct_plan, anticipose, cvae."
         )
 
         logger.info(
@@ -135,6 +150,21 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
                 "wrench_predictor_ckpt. Predicted wrenches will be zeros."
             )
 
+        # ---- Frozen CVAE encoder (B6 cvae only) ----
+        self._cvae_encoder: Optional[torch.nn.Module] = None
+        cvae_ckpt = getattr(self.config, "cvae_ckpt", None)
+        if self._ap_mode == "cvae" and cvae_ckpt is not None:
+            self._cvae_encoder = self._load_cvae(cvae_ckpt)
+            logger.info(
+                f"[AnticiPoseEnv] Loaded CVAE encoder "
+                f"from {cvae_ckpt!r}"
+            )
+        elif self._ap_mode == "cvae":
+            logger.warning(
+                "[AnticiPoseEnv] cvae mode but no "
+                "cvae_ckpt. CVAE latent will be zeros."
+            )
+
         # ---- Wrench data collector (B1 data-gathering stage) ----
         self._wrench_collector = None
         if self._ap_collect:
@@ -143,11 +173,14 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
             )
             capacity = getattr(self.config, "collect_buffer_size", 500_000)
             self._wrench_collector = WrenchDataCollector(
-                capacity=capacity, device=device,
+                num_envs=self.num_envs,
+                horizon=self._ap_horizon,
+                capacity=capacity,
+                device=device,
             )
             logger.info(
                 f"[AnticiPoseEnv] Wrench data collection enabled "
-                f"({capacity:,} capacity)"
+                f"(H={self._ap_horizon}, {capacity:,} pair capacity)"
             )
 
         self.init_done = True
@@ -167,6 +200,19 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
             "Ensure the robot URDF is loaded before AnticiPoseEnv init."
         )
 
+    def _resolve_num_bodies(self) -> int:
+        """Get the total number of rigid bodies from the simulator."""
+        if hasattr(self.simulator, "_rigid_body_pos"):
+            return self.simulator._rigid_body_pos.shape[1]
+        return len(self._resolve_body_names())
+
+    def _resolve_ee_body_indices(self) -> torch.Tensor:
+        """Get rigid body indices for left_rubber_hand and right_rubber_hand."""
+        body_names = self._resolve_body_names()
+        ee_names = ["left_rubber_hand", "right_rubber_hand"]
+        indices = [body_names.index(n) for n in ee_names]
+        return torch.tensor(indices, dtype=torch.long, device=self.device)
+
     # ------------------------------------------------------------------
     # Buffer initialisation
     # ------------------------------------------------------------------
@@ -182,11 +228,7 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         self._current_wrench = torch.zeros(
             n, _WRENCH_DIM, dtype=torch.float32, device=self.device,
         )
-        # Oracle wrench buffer: H future GT wrenches flattened (N, H*6)
-        self._oracle_wrench_buf = torch.zeros(
-            n, H * _WRENCH_DIM, dtype=torch.float32, device=self.device,
-        )
-        # Predicted wrench buffer: same shape, filled by frozen predictor
+        # Predicted wrench buffer: H future predicted wrenches (N, H*6)
         self._predicted_wrench_buf = torch.zeros(
             n, H * _WRENCH_DIM, dtype=torch.float32, device=self.device,
         )
@@ -194,9 +236,24 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         self._arm_plan_buf = torch.zeros(
             n, H * _ARM_JOINTS, dtype=torch.float32, device=self.device,
         )
+        # CVAE latent buffer: 30-dim (same as predicted wrench for parity)
+        self._cvae_latent_buf = torch.zeros(
+            n, H * _WRENCH_DIM, dtype=torch.float32, device=self.device,
+        )
         # Current-step arm targets: (N, 14)
         self._arm_targets = torch.zeros(
             n, _ARM_JOINTS, dtype=torch.float32, device=self.device,
+        )
+        # Payload mass per env (randomized at reset): (N,)
+        self._payload_mass = torch.zeros(
+            n, dtype=torch.float32, device=self.device,
+        )
+        # Cached EE body indices for payload force application
+        self._ee_body_indices = self._resolve_ee_body_indices()
+        # Payload force tensor for apply_rigid_body_force_at_pos_tensor: (N, num_bodies, 3)
+        num_bodies = self._resolve_num_bodies()
+        self._payload_force = torch.zeros(
+            n, num_bodies, 3, dtype=torch.float32, device=self.device,
         )
 
     # ------------------------------------------------------------------
@@ -221,13 +278,16 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
     # ------------------------------------------------------------------
 
     def _pre_physics_step(self, actions):
-        """Override to inject scripted arm targets before PD control.
+        """Override to inject scripted arm targets and payload forces.
 
         The PD controller computes:
           torque = Kp * (action * scale + default_dof_pos - dof_pos) - Kd * dof_vel
 
         Setting action = (desired - default_dof_pos) / scale makes the
         controller drive the arm joints to the desired trajectory positions.
+
+        Payload: Apply gravitational force at EE rigid bodies to simulate
+        carrying an object of mass self._payload_mass[env_i].
         """
         self._advance_arm_trajectory()
 
@@ -239,6 +299,10 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         ) / scale
 
         super()._pre_physics_step(modified)
+
+        # Apply payload gravitational force at EE bodies
+        if self._max_payload_mass > 0.0:
+            self._apply_payload_forces()
 
     # ------------------------------------------------------------------
     # Pre-observation callback: compute wrenches before obs assembly
@@ -253,47 +317,52 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         """
         super()._pre_compute_observations_callback()
 
-        # Disable FALCON's external EE forces --- disturbance comes from
-        # arm motion dynamics only, not random external forces.
-        if hasattr(self, "left_ee_apply_force"):
-            self.left_ee_apply_force.zero_()
-        if hasattr(self, "right_ee_apply_force"):
-            self.right_ee_apply_force.zero_()
+        # For B1 (reactive), do NOT zero EE forces — leave FALCON's random
+        # external force perturbations intact so B1 is truly unmodified.
+        # For all other modes, zero them so disturbance comes from arm
+        # motion dynamics only.
+        if self._ap_mode != "reactive":
+            if hasattr(self, "left_ee_apply_force"):
+                self.left_ee_apply_force.zero_()
+            if hasattr(self, "right_ee_apply_force"):
+                self.right_ee_apply_force.zero_()
 
         # Compute ground-truth wrench from arm rigid body dynamics
-        self._current_wrench[:] = self._analytical_wrench.compute()
-
-        # Fill oracle wrench buffer (tile current wrench H times for MVP;
-        # true future wrenches would require forward simulation).
-        self._oracle_wrench_buf[:] = self._current_wrench.repeat(
-            1, self._ap_horizon,
+        self._current_wrench[:] = self._analytical_wrench.compute(
+            payload_mass=self._payload_mass,
         )
 
         # Run frozen predictor if loaded
         if self._wrench_predictor is not None:
             self._run_wrench_predictor()
 
+        # Run frozen CVAE encoder if loaded
+        if self._cvae_encoder is not None:
+            self._run_cvae_encoder()
+
     # ------------------------------------------------------------------
     # Post-observation callback: data collection
     # ------------------------------------------------------------------
 
     def _post_compute_observations_callback(self):
-        """Override to collect wrench supervision data after obs assembly."""
+        """Override to collect wrench supervision data after obs assembly.
+
+        Uses temporal-offset collection: at each step we push
+        (obs_t, plan_t, wrench_t) into per-env FIFO queues.  When a queue
+        has H+1 entries, the collector yields training pairs:
+          (obs_{t-H}, plan_{t-H}) -> [wrench_{t-H+1}, ..., wrench_t]
+        """
         super()._post_compute_observations_callback()
 
         if self._wrench_collector is not None:
             obs_step = self._build_predictor_obs()
-            self._wrench_collector.add(
+            self._wrench_collector.push_step(
                 obs_step, self._arm_plan_buf, self._current_wrench,
             )
 
     # ------------------------------------------------------------------
     # Observation getters (FALCON dispatches _get_obs_<name>() via YAML)
     # ------------------------------------------------------------------
-
-    def _get_obs_oracle_wrench(self) -> torch.Tensor:
-        """GT future wrenches. Shape: (N, H*6=30). Used by B2 oracle."""
-        return self._oracle_wrench_buf
 
     def _get_obs_predicted_wrench(self) -> torch.Tensor:
         """Predicted future wrenches. Shape: (N, H*6=30). Used by B5."""
@@ -306,6 +375,10 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
     def _get_obs_current_wrench(self) -> torch.Tensor:
         """Current-step base wrench. Shape: (N, 6). Critic-only obs."""
         return self._current_wrench
+
+    def _get_obs_cvae_latent(self) -> torch.Tensor:
+        """CVAE latent encoding of arm plan. Shape: (N, 30). Used by B6."""
+        return self._cvae_latent_buf
 
     # ------------------------------------------------------------------
     # Wrench predictor inference
@@ -347,6 +420,50 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         ], dim=-1)                                          # = 115
 
     # ------------------------------------------------------------------
+    # CVAE encoder inference
+    # ------------------------------------------------------------------
+
+    def _run_cvae_encoder(self):
+        """Run the frozen CVAE encoder to fill _cvae_latent_buf.
+
+        Input: obs (115) + arm_plan (70) = 185 dims.
+        Output: deterministic latent mu (30 dims).
+        """
+        obs_step = self._build_predictor_obs()
+        with torch.no_grad():
+            self._cvae_latent_buf[:] = self._cvae_encoder(
+                obs_step, self._arm_plan_buf,
+            )
+
+    def _load_cvae(self, ckpt_path: str) -> torch.nn.Module:
+        """Load and freeze a CVAE encoder from checkpoint.
+
+        Tries TorchScript first (fastest inference), then falls back to
+        state-dict loading with the standard ArmPlanCVAE architecture.
+
+        Args:
+            ckpt_path: Path to saved model (.pt).
+
+        Returns:
+            A frozen torch.nn.Module on self.device.
+        """
+        try:
+            encoder = torch.jit.load(ckpt_path, map_location=self.device)
+            encoder.eval()
+            for param in encoder.parameters():
+                param.requires_grad_(False)
+            logger.info("[AnticiPoseEnv] Loaded TorchScript CVAE encoder.")
+            return encoder
+        except (RuntimeError, ValueError):
+            pass
+
+        from humanoidverse.models.arm_plan_cvae import ArmPlanCVAE
+        encoder = ArmPlanCVAE().to(self.device)
+        encoder.load_frozen(ckpt_path)
+        logger.info("[AnticiPoseEnv] Loaded state-dict CVAE encoder.")
+        return encoder
+
+    # ------------------------------------------------------------------
     # Reset handling
     # ------------------------------------------------------------------
 
@@ -358,10 +475,24 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         self._arm_traj_gen.reset(env_ids)
         self._analytical_wrench.reset(env_ids)
         self._current_wrench[env_ids] = 0.0
-        self._oracle_wrench_buf[env_ids] = 0.0
         self._predicted_wrench_buf[env_ids] = 0.0
+        self._cvae_latent_buf[env_ids] = 0.0
         self._arm_plan_buf[env_ids] = 0.0
         self._arm_targets[env_ids] = 0.0
+
+        # Randomize payload mass per env: uniform [0, max_payload_mass]
+        if self._max_payload_mass > 0.0:
+            self._payload_mass[env_ids] = (
+                torch.rand(len(env_ids), device=self.device)
+                * self._max_payload_mass
+            )
+        else:
+            self._payload_mass[env_ids] = 0.0
+
+        # Flush wrench data collector queues on reset to avoid
+        # cross-episode temporal pairs.
+        if self._wrench_collector is not None:
+            self._wrench_collector.flush_envs(env_ids)
 
         super().reset_envs_idx(env_ids, target_states, target_buf)
 
@@ -441,10 +572,25 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         wrench_scale = torch.clamp(max_wrench / 50.0, 0.0, 1.0)
         return upright_reward * wrench_scale
 
-    def _reward_penalty_wrench_prediction_error(self) -> torch.Tensor:
-        """Penalty proportional to prediction error (analysis only)."""
-        error = self._predicted_wrench_buf - self._oracle_wrench_buf
-        return torch.norm(error, dim=-1)
+    # ------------------------------------------------------------------
+    # Payload simulation
+    # ------------------------------------------------------------------
+
+    def _apply_payload_forces(self):
+        """Apply gravitational force at EE rigid bodies for payload sim.
+
+        Each env carries a payload of mass self._payload_mass[i] kg.
+        Force is split equally between left and right EE (rubber_hand).
+        Applied as pure -Z force in world frame (gravity).
+        """
+        self._payload_force.zero_()
+        # Split payload equally between two hands: F = -m*g/2 per hand
+        per_hand_force = -self._payload_mass * 9.81 * 0.5  # (N,)
+        for ee_idx in self._ee_body_indices:
+            self._payload_force[:, ee_idx, 2] = per_hand_force
+        self.simulator.apply_rigid_body_force_at_pos_tensor(
+            self._payload_force, self.apply_force_pos_tensor,
+        )
 
     # ------------------------------------------------------------------
     # Evaluation mode

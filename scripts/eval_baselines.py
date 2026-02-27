@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--max_episode_length_s", type=float, default=20.0)
     parser.add_argument("--arm_trajectory_task", default="random")
     parser.add_argument("--wrench_predictor_ckpt", default=None)
+    parser.add_argument("--cvae_ckpt", default=None)
     parser.add_argument("--output_dir", default="logs_eval")
     args = parser.parse_args()
 
@@ -76,6 +77,8 @@ def main():
     config.env.config.arm_trajectory_task = args.arm_trajectory_task
     if args.wrench_predictor_ckpt is not None:
         config.env.config.wrench_predictor_ckpt = args.wrench_predictor_ckpt
+    if args.cvae_ckpt is not None:
+        config.env.config.cvae_ckpt = args.cvae_ckpt
 
     pre_process_config(config)
 
