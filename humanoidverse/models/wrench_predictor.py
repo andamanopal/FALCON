@@ -12,15 +12,13 @@ Hidden : Linear(185->256) + LayerNorm(256) + ELU
          Linear(256->128) + LayerNorm(128) + ELU
 Output : Linear(128->30)   (H=5 x 6-dim wrench: force_xyz + torque_xyz)
 
-Parameter count: ~55 K  (verified analytically below)
+Parameter count: ~152K  (verified analytically below)
     185*256 + 256 = 47,616 + 256 = 47,872
     256*256 + 256 = 65,792 + 256 = 66,048
     256*128 + 128 = 32,896 + 128 = 33,024
     128*30  +  30 =  3,870 +  30 =  3,900
     LayerNorm params (weight+bias): 256+256+256+256+128+128 = 1,280
-    Total: ~152,124  (standard ~55K target reached if hidden=[128,128,64] but
-    spec says [256,256,128] — actual count is ~152K which is fine; spec
-    says "~55K params" but the [256,256,128] arch supersedes that note.)
+    Total: 152,124
 
 Z-score normalisation statistics are stored as non-trainable buffers so that
 they are saved/loaded with the model state-dict and transferred to any device

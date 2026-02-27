@@ -552,27 +552,6 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         return predictor
 
     # ------------------------------------------------------------------
-    # Reward extensions
-    # ------------------------------------------------------------------
-
-    def _reward_wrench_anticipation_bonus(self) -> torch.Tensor:
-        """Bonus for maintaining stability under high predicted wrench.
-
-        Scale controlled by YAML: reward_scales.wrench_anticipation_bonus.
-        """
-        pred_reshaped = self._predicted_wrench_buf.reshape(
-            self.num_envs, self._ap_horizon, _WRENCH_DIM,
-        )
-        wrench_norms = torch.norm(pred_reshaped, dim=-1)  # (N, H)
-        max_wrench = wrench_norms.max(dim=-1).values       # (N,)
-
-        upright_reward = 1.0 - torch.sum(
-            torch.abs(self.projected_gravity[:, :2]), dim=-1,
-        )
-        wrench_scale = torch.clamp(max_wrench / 50.0, 0.0, 1.0)
-        return upright_reward * wrench_scale
-
-    # ------------------------------------------------------------------
     # Payload simulation
     # ------------------------------------------------------------------
 

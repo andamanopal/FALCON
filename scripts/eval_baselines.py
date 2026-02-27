@@ -48,6 +48,11 @@ def main():
     parser.add_argument("--wrench_predictor_ckpt", default=None)
     parser.add_argument("--cvae_ckpt", default=None)
     parser.add_argument("--output_dir", default="logs_eval")
+    parser.add_argument(
+        "--walking_speeds", nargs="*", type=float, default=None,
+        help="Walking speed sweep: eval at each speed (m/s). "
+             "E.g., --walking_speeds 0.0 0.3 0.6 1.0",
+    )
     args = parser.parse_args()
 
     # Must import isaacgym before torch
@@ -93,107 +98,128 @@ def main():
     # Switch to eval mode
     for key in algo.actors:
         algo.actors[key].eval()
-    env.set_is_evaluating()
 
-    # Run evaluation
     sim_fps = config.simulator.config.sim.fps
     control_dec = config.simulator.config.sim.control_decimation
     max_steps = int(args.max_episode_length_s * sim_fps / control_dec)
     num_envs = args.num_envs
-
-    print(f"[Eval] {args.eval_name}")
-    print(f"[Eval] checkpoint: {args.checkpoint}")
-    print(f"[Eval] task: {args.arm_trajectory_task}")
-    print(f"[Eval] num_envs={num_envs}, num_episodes={args.num_episodes}, max_steps={max_steps}")
-
-    episode_rewards = []
-    episode_lengths = []
-    episode_survived = []  # did it survive the full episode?
-
-    total_episodes_done = 0
-    step = 0
-
-    obs_dict = env.reset_all()
     num_actions = config.robot.lower_body_actions_dim + config.robot.upper_body_actions_dim
-    actions = torch.zeros(num_envs, num_actions, device=device)
-    cumulative_reward = torch.zeros(num_envs, device=device)
-    episode_len = torch.zeros(num_envs, device=device)
 
-    while total_episodes_done < args.num_episodes:
-        with torch.no_grad():
-            actor_obs = obs_dict["actor_obs"]
-            act_parts = {}
-            for key in algo.actors:
-                act_parts[key] = algo.actors[key].act_inference(actor_obs)
-            actions = torch.cat([act_parts[key] for key in algo.keys], dim=1)
+    # Determine walking speeds to evaluate
+    walking_speeds = args.walking_speeds if args.walking_speeds is not None else [None]
 
-        actor_state = {"actions": actions}
-        obs_dict, rewards, dones, extras = env.step(actor_state)
+    all_speed_results = []
+    for speed in walking_speeds:
+        # Configure eval mode with optional walking speed command
+        if speed is not None:
+            env.set_is_evaluating(command=[speed, 0.0, 0.0])
+            speed_label = f"speed_{speed:.1f}"
+            eval_label = f"{args.eval_name}_{speed_label}"
+        else:
+            env.set_is_evaluating()
+            speed_label = None
+            eval_label = args.eval_name
 
-        cumulative_reward += sum(rewards.values())
-        episode_len += 1
-        step += 1
+        print(f"\n[Eval] {eval_label}")
+        print(f"[Eval] checkpoint: {args.checkpoint}")
+        print(f"[Eval] task: {args.arm_trajectory_task}")
+        if speed is not None:
+            print(f"[Eval] walking speed: {speed:.1f} m/s")
+        print(f"[Eval] num_envs={num_envs}, num_episodes={args.num_episodes}, max_steps={max_steps}")
 
-        # Collect finished episodes
-        done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
-        for idx in done_indices:
-            i = idx.item()
-            ep_reward = cumulative_reward[i].item()
-            ep_len = episode_len[i].item()
-            survived = ep_len >= (max_steps - 1)
+        # Run episodes
+        episode_rewards = []
+        episode_lengths = []
+        episode_survived = []
 
-            episode_rewards.append(ep_reward)
-            episode_lengths.append(ep_len)
-            episode_survived.append(survived)
-            total_episodes_done += 1
+        total_episodes_done = 0
+        obs_dict = env.reset_all()
+        cumulative_reward = torch.zeros(num_envs, device=device)
+        episode_len = torch.zeros(num_envs, device=device)
 
-            if total_episodes_done % 10 == 0:
-                print(f"  Episodes: {total_episodes_done}/{args.num_episodes}")
+        while total_episodes_done < args.num_episodes:
+            with torch.no_grad():
+                actor_obs = obs_dict["actor_obs"]
+                act_parts = {}
+                for key in algo.actors:
+                    act_parts[key] = algo.actors[key].act_inference(actor_obs)
+                actions = torch.cat([act_parts[key] for key in algo.keys], dim=1)
 
-            # Reset counters for this env
-            cumulative_reward[i] = 0.0
-            episode_len[i] = 0.0
+            actor_state = {"actions": actions}
+            obs_dict, rewards, dones, extras = env.step(actor_state)
 
-            if total_episodes_done >= args.num_episodes:
-                break
+            cumulative_reward += sum(rewards.values())
+            episode_len += 1
 
-    # Compute metrics
-    rewards_t = torch.tensor(episode_rewards)
-    lengths_t = torch.tensor(episode_lengths)
-    survived_t = torch.tensor(episode_survived, dtype=torch.float32)
+            done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
+            for idx in done_indices:
+                i = idx.item()
+                ep_reward = cumulative_reward[i].item()
+                ep_len = episode_len[i].item()
+                survived = ep_len >= (max_steps - 1)
 
-    results = {
-        "eval_name": args.eval_name,
-        "checkpoint": args.checkpoint,
-        "arm_trajectory_task": args.arm_trajectory_task,
-        "num_episodes": len(episode_rewards),
-        "max_steps": max_steps,
-        "mean_reward": rewards_t.mean().item(),
-        "std_reward": rewards_t.std().item(),
-        "mean_episode_length": lengths_t.mean().item(),
-        "std_episode_length": lengths_t.std().item(),
-        "survival_rate": survived_t.mean().item(),
-        "min_reward": rewards_t.min().item(),
-        "max_reward": rewards_t.max().item(),
-    }
+                episode_rewards.append(ep_reward)
+                episode_lengths.append(ep_len)
+                episode_survived.append(survived)
+                total_episodes_done += 1
 
-    # Print results
-    print(f"\n{'='*60}")
-    print(f"  {args.eval_name}")
-    print(f"{'='*60}")
-    print(f"  Mean reward:      {results['mean_reward']:.2f} +/- {results['std_reward']:.2f}")
-    print(f"  Mean ep length:   {results['mean_episode_length']:.1f} +/- {results['std_episode_length']:.1f}")
-    print(f"  Survival rate:    {results['survival_rate']*100:.1f}%")
-    print(f"  Reward range:     [{results['min_reward']:.2f}, {results['max_reward']:.2f}]")
-    print(f"{'='*60}\n")
+                if total_episodes_done % 10 == 0:
+                    print(f"  Episodes: {total_episodes_done}/{args.num_episodes}")
 
-    # Save results
-    out_dir = Path(args.output_dir) / args.eval_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "results.json"
-    with open(out_file, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"[Eval] Results saved to {out_file}")
+                cumulative_reward[i] = 0.0
+                episode_len[i] = 0.0
+
+                if total_episodes_done >= args.num_episodes:
+                    break
+
+        # Compute metrics
+        rewards_t = torch.tensor(episode_rewards)
+        lengths_t = torch.tensor(episode_lengths)
+        survived_t = torch.tensor(episode_survived, dtype=torch.float32)
+
+        results = {
+            "eval_name": eval_label,
+            "checkpoint": args.checkpoint,
+            "arm_trajectory_task": args.arm_trajectory_task,
+            "walking_speed": speed,
+            "num_episodes": len(episode_rewards),
+            "max_steps": max_steps,
+            "mean_reward": rewards_t.mean().item(),
+            "std_reward": rewards_t.std().item(),
+            "mean_episode_length": lengths_t.mean().item(),
+            "std_episode_length": lengths_t.std().item(),
+            "survival_rate": survived_t.mean().item(),
+            "min_reward": rewards_t.min().item(),
+            "max_reward": rewards_t.max().item(),
+        }
+        all_speed_results.append(results)
+
+        # Print results
+        print(f"\n{'='*60}")
+        print(f"  {eval_label}")
+        print(f"{'='*60}")
+        print(f"  Mean reward:      {results['mean_reward']:.2f} +/- {results['std_reward']:.2f}")
+        print(f"  Mean ep length:   {results['mean_episode_length']:.1f} +/- {results['std_episode_length']:.1f}")
+        print(f"  Survival rate:    {results['survival_rate']*100:.1f}%")
+        print(f"  Reward range:     [{results['min_reward']:.2f}, {results['max_reward']:.2f}]")
+        print(f"{'='*60}\n")
+
+        # Save per-speed results
+        out_dir = Path(args.output_dir) / eval_label
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "results.json"
+        with open(out_file, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"[Eval] Results saved to {out_file}")
+
+    # Save aggregate speed sweep results if multiple speeds were tested
+    if len(all_speed_results) > 1:
+        sweep_dir = Path(args.output_dir) / args.eval_name
+        sweep_dir.mkdir(parents=True, exist_ok=True)
+        sweep_file = sweep_dir / "speed_sweep_results.json"
+        with open(sweep_file, "w") as f:
+            json.dump(all_speed_results, f, indent=2)
+        print(f"[Eval] Speed sweep aggregate saved to {sweep_file}")
 
 
 if __name__ == "__main__":
