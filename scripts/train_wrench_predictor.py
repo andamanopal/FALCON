@@ -332,6 +332,103 @@ def _log_wandb_final(metrics):
         wandb.run.summary[key] = val
 
 
+def evaluate(args):
+    """Evaluate a trained predictor checkpoint on its validation split.
+
+    Loads the checkpoint and data, reproduces the train/val split, runs
+    inference on the val set, and prints full per-component metrics.
+    """
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        log.warning("CUDA requested but not available; falling back to CPU.")
+    log.info(f"Using device: {device}")
+
+    ckpt_path = args.checkpoint
+    if not Path(ckpt_path).exists():
+        log.error(f"Checkpoint file not found: {ckpt_path}")
+        sys.exit(1)
+    log.info(f"Loading checkpoint: {ckpt_path}")
+    # weights_only=False needed to deserialize train_config and metrics dicts
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+    # Print saved aggregate metrics (always available)
+    saved_metrics = ckpt.get("metrics", {})
+    log.info("=" * 60)
+    log.info("Saved metrics from training:")
+    log.info(f"  R²   (aggregate): {saved_metrics.get('r2_total', 'N/A')}")
+    log.info(f"  RMSE (aggregate): {saved_metrics.get('rmse_total', 'N/A')}")
+    log.info(f"  Best val loss:    {saved_metrics.get('best_val_loss', 'N/A')}")
+
+    if not args.data_path:
+        # Try to recover data path from checkpoint
+        train_config = ckpt.get("train_config", {})
+        saved_data_path = train_config.get("data_path")
+        if saved_data_path and Path(saved_data_path).exists():
+            args.data_path = saved_data_path
+            log.info(f"  Using data_path from checkpoint: {args.data_path}")
+        else:
+            log.info("")
+            log.info("No --data_path provided and checkpoint's data_path not found.")
+            log.info("Only saved aggregate metrics are available (above).")
+            log.info("Provide --data_path for full per-component evaluation.")
+            return
+
+    # Full evaluation with data
+    log.info("=" * 60)
+    log.info("Running full per-component evaluation ...")
+
+    obs_all, plan_all, wrench_all = load_dataset(args.data_path, device)
+    n_total = obs_all.shape[0]
+    n_train = int(0.8 * n_total)
+    n_val = n_total - n_train
+    log.info(f"Split: {n_train:,} train / {n_val:,} val")
+
+    generator = torch.Generator().manual_seed(42)
+    full_dataset = TensorDataset(obs_all, plan_all, wrench_all)
+    _, val_dataset = random_split(
+        full_dataset, [n_train, n_val], generator=generator
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size * 2,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=(device.type == "cuda"),
+    )
+
+    WrenchPredictor = _load_predictor_class()
+    model = WrenchPredictor().to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    log.info(f"Model parameters: {model.num_parameters():,}")
+
+    all_pred = []
+    all_target = []
+    with torch.no_grad():
+        for obs_b, plan_b, wrench_b in val_loader:
+            obs_b = obs_b.to(device, non_blocking=True)
+            plan_b = plan_b.to(device, non_blocking=True)
+            wrench_b = wrench_b.to(device, non_blocking=True)
+            pred = model(obs_b, plan_b)
+            all_pred.append(pred.cpu())
+            all_target.append(wrench_b.cpu())
+
+    pred_all = torch.cat(all_pred, dim=0)
+    target_all = torch.cat(all_target, dim=0)
+    metrics = compute_metrics(pred_all, target_all)
+
+    log.info("")
+    log.info(f"Validation RMSE (aggregate): {metrics['rmse_total']:.6f}")
+    log.info(f"Validation R²   (aggregate): {metrics['r2_total']:.6f}")
+    log.info(f"Validation Corr (aggregate): "
+             f"{metrics['correlation_per_comp'].mean().item():.6f}")
+    log.info("")
+    log.info("Per-component breakdown:")
+    print_per_component_table(metrics)
+    log.info("Evaluation complete.")
+
+
 def train(args):
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
@@ -602,7 +699,7 @@ def parse_args():
     parser.add_argument(
         "--data_path",
         type=str,
-        required=True,
+        default=None,
         help="Path to .pt file produced by WrenchDataCollector.save().",
     )
     parser.add_argument(
@@ -658,9 +755,29 @@ def parse_args():
         action="store_true",
         help="Disable WandB logging even if installed.",
     )
+    parser.add_argument(
+        "--eval_only",
+        action="store_true",
+        help="Skip training. Load --checkpoint and evaluate on val split.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Path to trained predictor .pt checkpoint (required for --eval_only).",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    train(args)
+    if args.eval_only:
+        if not args.checkpoint:
+            log.error("--eval_only requires --checkpoint <path>")
+            sys.exit(1)
+        evaluate(args)
+    else:
+        if not args.data_path:
+            log.error("--data_path is required for training")
+            sys.exit(1)
+        train(args)

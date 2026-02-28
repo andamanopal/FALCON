@@ -95,7 +95,7 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 .PHONY: help
 .PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b6
 .PHONY: train-pipeline train-pipeline-tmux pipeline-status pipeline-resume
-.PHONY: collect-wrench train-predictor train-cvae
+.PHONY: collect-wrench train-predictor eval-predictor train-cvae
 .PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b6
 .PHONY: smoke-test retrain-b5
 .PHONY: sync-wandb results
@@ -197,6 +197,17 @@ train-predictor:
 	  --wandb_entity $(WANDB_ENTITY) \
 	  --wandb_project $(WANDB_PROJECT) \
 	  --wandb_run_name wrench_pred_seed$(SEED)_ep$(PRED_EPOCHS)
+
+## eval-predictor: Evaluate a trained wrench predictor checkpoint (prints R², RMSE, per-component table)
+eval-predictor:
+	@test -f "$(PRED_CKPT)" || (echo "ERROR: Predictor not found at $(PRED_CKPT). Run: make train-predictor" && exit 1)
+	python scripts/train_wrench_predictor.py \
+	  --eval_only \
+	  --checkpoint $(PRED_CKPT) \
+	  --data_path $(WRENCH_DATA) \
+	  --batch_size $(PRED_BATCH) \
+	  --device cuda \
+	  --no_wandb
 
 ## train-cvae: Train CVAE arm plan encoder from collected data
 train-cvae:
