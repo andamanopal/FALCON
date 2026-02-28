@@ -140,7 +140,7 @@ def main(config: OmegaConf):
 
     # Ensure wrench data collection is enabled in the env config
     config.env.config.collect_wrench_data = True
-    config.env.config.collect_buffer_size = min(num_samples, 1_000_000)
+    config.env.config.collect_buffer_size = num_samples
 
     pre_process_config(config)
 
