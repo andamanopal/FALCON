@@ -21,7 +21,7 @@
 #   make eval-all SEED=42
 #
 # Multi-seed final run:
-#   for S in 35 42 123 456; do make train-pipeline SEED=$S; done
+#   for S in 42 123 456 789 35; do make train-pipeline SEED=$S; done
 # ============================================================================
 
 # ---------------------------------------------------------------------------
@@ -36,18 +36,22 @@ EVAL_NUM_ENVS   ?= 64
 OUTPUT_DIR      ?= logs_eval
 LOG_DIR         ?= logs
 PROJECT         ?= anticipose_overnight
+# Predictor/CVAE training (increase PRED_EPOCHS for longer training to
+# improve R²; the default 100 may bottleneck before convergence).
 PRED_EPOCHS     ?= 100
 PRED_BATCH      ?= 4096
 PRED_PATIENCE   ?= 10
+WANDB_ENTITY    ?= andaman-l
+WANDB_PROJECT   ?= AnticiPose
 COLLECT_SAMPLES ?= 500000
 VENV            ?= /workspace/AnticiPose/.venv/bin/activate
 EVAL_EXTRA_ARGS ?=
 
-# Derived paths
-PRED_CKPT         = $(LOG_DIR)/$(PROJECT)/wrench_predictor_seed$(SEED).pt
-CVAE_CKPT         = $(LOG_DIR)/$(PROJECT)/arm_plan_cvae_seed$(SEED).pt
-WRENCH_DATA       = $(LOG_DIR)/$(PROJECT)/wrench_data_seed$(SEED).pt
-PIPELINE_PROGRESS = $(LOG_DIR)/$(PROJECT)/pipeline_progress_seed$(SEED).txt
+# Derived paths (overridable for quick iteration, e.g. reusing existing data)
+WRENCH_DATA       ?= $(LOG_DIR)/$(PROJECT)/wrench_data_seed$(SEED).pt
+PRED_CKPT         ?= $(LOG_DIR)/$(PROJECT)/wrench_predictor_seed$(SEED).pt
+CVAE_CKPT         ?= $(LOG_DIR)/$(PROJECT)/arm_plan_cvae_seed$(SEED).pt
+PIPELINE_PROGRESS  = $(LOG_DIR)/$(PROJECT)/pipeline_progress_seed$(SEED).txt
 
 # Training command
 TRAIN_CMD = python humanoidverse/train_agent.py +exp=anticipose
@@ -93,7 +97,7 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 .PHONY: train-pipeline train-pipeline-tmux pipeline-status pipeline-resume
 .PHONY: collect-wrench train-predictor train-cvae
 .PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b6
-.PHONY: smoke-test
+.PHONY: smoke-test retrain-b5
 .PHONY: sync-wandb results
 
 # ============================================================================
@@ -189,7 +193,10 @@ train-predictor:
 	  --epochs $(PRED_EPOCHS) \
 	  --batch_size $(PRED_BATCH) \
 	  --patience $(PRED_PATIENCE) \
-	  --device cuda
+	  --device cuda \
+	  --wandb_entity $(WANDB_ENTITY) \
+	  --wandb_project $(WANDB_PROJECT) \
+	  --wandb_run_name wrench_pred_seed$(SEED)_ep$(PRED_EPOCHS)
 
 ## train-cvae: Train CVAE arm plan encoder from collected data
 train-cvae:
@@ -200,7 +207,27 @@ train-cvae:
 	  --epochs $(PRED_EPOCHS) \
 	  --batch_size $(PRED_BATCH) \
 	  --patience $(PRED_PATIENCE) \
-	  --device cuda
+	  --device cuda \
+	  --wandb_entity $(WANDB_ENTITY) \
+	  --wandb_project $(WANDB_PROJECT) \
+	  --wandb_run_name cvae_seed$(SEED)_ep$(PRED_EPOCHS)
+
+# ============================================================================
+# B5 QUICK ITERATION (skip B1 training, re-use existing wrench data if present)
+# ============================================================================
+
+## retrain-b5: Re-collect data, retrain predictor, retrain B5, and eval (~4-7h vs 24h full pipeline)
+retrain-b5:
+	@echo "=== RETRAIN-B5 (seed=$(SEED), pred_epochs=$(PRED_EPOCHS), collect_samples=$(COLLECT_SAMPLES)) ==="
+	$(MAKE) --no-print-directory collect-wrench SEED=$(SEED)
+	$(MAKE) --no-print-directory train-predictor SEED=$(SEED)
+	$(MAKE) --no-print-directory train-b5 SEED=$(SEED)
+	$(MAKE) --no-print-directory eval-b5 SEED=$(SEED)
+	@echo ""
+	@echo "========================================"
+	@echo "  RETRAIN-B5 COMPLETE (seed=$(SEED))"
+	@echo "========================================"
+	@$(MAKE) --no-print-directory results SEED=$(SEED)
 
 # ============================================================================
 # FULL SEQUENTIAL PIPELINE (1 GPU, overnight)
@@ -240,6 +267,18 @@ step_label() { \
 		10) echo "B6 CVAE latent";; \
 		11) echo "Evaluate all";; \
 	esac; \
+}; \
+step_wandb_name() { \
+	case $$1 in \
+		1)  echo "B1_reactive";; \
+		5)  echo "B2_extended_history";; \
+		6)  echo "B3_current_wrench";; \
+		7)  echo "B4a_direct_plan";; \
+		8)  echo "B4b_direct_plan_critic";; \
+		9)  echo "B5_anticipose";; \
+		10) echo "B6_cvae";; \
+		*)  echo "";; \
+	esac; \
 }
 endef
 
@@ -256,6 +295,14 @@ train-pipeline:
 		echo ""; \
 		echo "[$$STEP/$(PIPELINE_TOTAL)] $$LABEL..."; \
 		$(MAKE) --no-print-directory $$TARGET SEED=$(SEED) || exit 1; \
+		WANDB_NAME=$$(step_wandb_name $$STEP); \
+		if [ -n "$$WANDB_NAME" ]; then \
+			RUN_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*$${WANDB_NAME}_seed$(SEED)* 2>/dev/null | head -1); \
+			if [ -n "$$RUN_DIR" ]; then \
+				echo "[wandb] Re-syncing $$WANDB_NAME from $$RUN_DIR"; \
+				python scripts/sync_wandb.py "$$RUN_DIR" "$${WANDB_NAME}_seed$(SEED)" || echo "[wandb] Sync failed (non-fatal)"; \
+			fi; \
+		fi; \
 		echo $$STEP > $(PIPELINE_PROGRESS); \
 		STEP=$$((STEP + 1)); \
 	done; \
@@ -289,6 +336,14 @@ pipeline-resume:
 		echo ""; \
 		echo "[$$STEP/$(PIPELINE_TOTAL)] $$LABEL..."; \
 		$(MAKE) --no-print-directory $$TARGET SEED=$(SEED) || exit 1; \
+		WANDB_NAME=$$(step_wandb_name $$STEP); \
+		if [ -n "$$WANDB_NAME" ]; then \
+			RUN_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*$${WANDB_NAME}_seed$(SEED)* 2>/dev/null | head -1); \
+			if [ -n "$$RUN_DIR" ]; then \
+				echo "[wandb] Re-syncing $$WANDB_NAME from $$RUN_DIR"; \
+				python scripts/sync_wandb.py "$$RUN_DIR" "$${WANDB_NAME}_seed$(SEED)" || echo "[wandb] Sync failed (non-fatal)"; \
+			fi; \
+		fi; \
 		echo $$STEP > $(PIPELINE_PROGRESS); \
 		STEP=$$((STEP + 1)); \
 	done; \
@@ -522,12 +577,17 @@ help:
 	@echo "Variables (with defaults):"
 	@echo "  SEED=$(SEED)  NUM_ENVS=$(NUM_ENVS)  NUM_ITERS=$(NUM_ITERS)"
 	@echo "  NUM_EPISODES=$(NUM_EPISODES)  MAX_EP_LEN_S=$(MAX_EP_LEN_S)  EVAL_NUM_ENVS=$(EVAL_NUM_ENVS)"
+	@echo "  PRED_EPOCHS=$(PRED_EPOCHS)  PRED_BATCH=$(PRED_BATCH)  PRED_PATIENCE=$(PRED_PATIENCE)"
+	@echo "  COLLECT_SAMPLES=$(COLLECT_SAMPLES)  WANDB_ENTITY=$(WANDB_ENTITY)  WANDB_PROJECT=$(WANDB_PROJECT)"
 	@echo ""
 	@echo "Baselines:"
 	@echo "  B1   Reactive (FALCON)         B2   Extended History (10-step)"
 	@echo "  B3   Current Wrench            B4a  Direct Plan (Actor)"
 	@echo "  B4b  Direct Plan (Critic)      B5   AnticiPose (ours)"
 	@echo "  B6   CVAE Latent"
+	@echo ""
+	@echo "Quick iteration (retrain predictor + B5 only, ~4-7h):"
+	@echo "  make retrain-b5 SEED=42 COLLECT_SAMPLES=2000000 PRED_EPOCHS=500 PRED_PATIENCE=20"
 	@echo ""
 	@echo "Quick verification:"
 	@echo "  make smoke-test SEED=42            # Full pipeline, tiny settings (~minutes)"

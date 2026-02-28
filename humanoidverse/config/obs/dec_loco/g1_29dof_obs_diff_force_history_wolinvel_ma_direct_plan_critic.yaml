@@ -4,7 +4,7 @@
 # arm_plan (70 dims) is in CRITIC obs only, NOT in actor obs.
 # Tests whether the actor needs anticipatory info, or just the value function.
 # Per-step actor obs: 115 dims (same as B1).
-# Per-step critic obs: 121 + 70 = 191 dims.
+# Per-step critic obs: 128 + 70 = 198 dims.
 # Actor with history_length=5: 115 x 5 = 575 dims total.
 
 obs:

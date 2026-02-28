@@ -30,6 +30,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 # ---------------------------------------------------------------------------
+# Optional WandB (graceful fallback if not installed)
+# ---------------------------------------------------------------------------
+try:
+    import wandb
+    _HAS_WANDB = True
+except ImportError:
+    wandb = None
+    _HAS_WANDB = False
+
+# ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
 logging.basicConfig(
@@ -156,6 +166,80 @@ def get_beta(epoch: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# WandB helpers
+# ---------------------------------------------------------------------------
+
+def _init_wandb_cvae(args, n_train: int, n_val: int, num_params: int,
+                     num_encoder_params: int):
+    """Initialize WandB run if available and not disabled."""
+    use_wandb = _HAS_WANDB and not args.no_wandb
+    if not use_wandb:
+        if not _HAS_WANDB and not args.no_wandb:
+            log.info("WandB not installed — logging to console only.")
+        return False
+
+    run_name = args.wandb_run_name or f"cvae_{Path(args.data_path).stem}"
+    wandb.init(
+        entity=args.wandb_entity,
+        project=args.wandb_project,
+        name=run_name,
+        config={
+            "model": "ArmPlanCVAE",
+            "data_path": args.data_path,
+            "save_path": args.save_path,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "patience": args.patience,
+            "device": args.device,
+            "n_train": n_train,
+            "n_val": n_val,
+            "num_params": num_params,
+            "num_encoder_params": num_encoder_params,
+            "obs_dim": OBS_DIM,
+            "plan_dim": PLAN_DIM,
+            "latent_dim": LATENT_DIM,
+            "beta_warmup_start": BETA_WARMUP_START,
+            "beta_warmup_end": BETA_WARMUP_END,
+            "beta_final": BETA_FINAL,
+        },
+    )
+    log.info(f"WandB initialized: {wandb.run.url}")
+    return True
+
+
+def _log_wandb_cvae_epoch(epoch, train_recon, train_kl, train_elbo,
+                          val_recon, val_kl, val_elbo, beta, lr,
+                          best_val_elbo):
+    """Log per-epoch CVAE metrics to WandB."""
+    wandb.log({
+        "epoch": epoch,
+        "train_recon_loss": train_recon,
+        "train_kl": train_kl,
+        "train_elbo": train_elbo,
+        "val_recon_loss": val_recon,
+        "val_kl": val_kl,
+        "val_elbo": val_elbo,
+        "beta": beta,
+        "learning_rate": lr,
+        "best_val_elbo": best_val_elbo,
+    }, step=epoch)
+
+
+def _log_wandb_cvae_final(final_recon, final_kl, best_val_elbo,
+                          posterior_collapse):
+    """Log end-of-training CVAE summary to WandB."""
+    summary = {
+        "final/val_recon_mse": final_recon,
+        "final/val_kl": final_kl,
+        "final/val_elbo": final_recon + final_kl,
+        "final/best_val_elbo": best_val_elbo,
+        "final/posterior_collapse": posterior_collapse,
+    }
+    for key, val in summary.items():
+        wandb.run.summary[key] = val
+
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
@@ -210,6 +294,14 @@ def train(args):
     )
     log.info(f"Total parameters:   {model.num_parameters():,}")
     log.info(f"Encoder parameters: {model.num_encoder_parameters():,}")
+
+    # ------------------------------------------------------------------
+    # WandB initialization
+    # ------------------------------------------------------------------
+    use_wandb = _init_wandb_cvae(
+        args, n_train, n_val,
+        model.num_parameters(), model.num_encoder_parameters(),
+    )
 
     # ------------------------------------------------------------------
     # Optimizer and scheduler
@@ -334,6 +426,13 @@ def train(args):
             f"lr={scheduler.get_last_lr()[0]:.2e}  time={elapsed:.1f}s"
         )
 
+        if use_wandb:
+            _log_wandb_cvae_epoch(
+                epoch, avg_train_recon, avg_train_kl, avg_train_elbo,
+                avg_val_recon, avg_val_kl, avg_val_elbo, beta,
+                scheduler.get_last_lr()[0], best_val_elbo,
+            )
+
         # ---- Early stopping ----
         # During beta warmup, track reconstruction loss only (the KL term
         # is artificially suppressed so ELBO is not a reliable metric).
@@ -399,11 +498,17 @@ def train(args):
     log.info(f"Val KL divergence:      {final_kl:.6f}")
     log.info(f"Val ELBO (beta=1.0):    {final_recon + final_kl:.6f}")
 
-    if final_kl < 1.0:
+    posterior_collapse = final_kl < 1.0
+    if posterior_collapse:
         log.warning(
             f"KL = {final_kl:.4f} < 1.0 — possible posterior collapse! "
             "The latent may not be encoding meaningful information. "
             "Consider reducing beta or increasing latent_dim."
+        )
+
+    if use_wandb:
+        _log_wandb_cvae_final(
+            final_recon, final_kl, best_val_elbo, posterior_collapse,
         )
 
     # ------------------------------------------------------------------
@@ -448,6 +553,9 @@ def train(args):
     )
     log.info(f"Checkpoint saved to: {save_path}")
     log.info(f"Load with: model.load_frozen('{save_path}')")
+
+    if use_wandb:
+        wandb.finish()
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +602,29 @@ def parse_args():
         type=str,
         default="cuda",
         help="Compute device: 'cuda', 'cuda:0', 'cpu', etc.",
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default="andaman-l",
+        help="WandB entity (team or username).",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="AnticiPose",
+        help="WandB project name.",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="WandB run name (auto-generated if omitted).",
+    )
+    parser.add_argument(
+        "--no_wandb",
+        action="store_true",
+        help="Disable WandB logging even if installed.",
     )
     return parser.parse_args()
 

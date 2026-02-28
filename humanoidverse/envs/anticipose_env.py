@@ -255,6 +255,13 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         self._payload_force = torch.zeros(
             n, num_bodies, 3, dtype=torch.float32, device=self.device,
         )
+        # Distribution shift monitoring (B5 only): throttle to every N steps
+        self._pred_monitor_interval = 50
+        self._pred_monitor_counter = 0
+        # Buffer previous step's t+1 prediction for temporally-aligned comparison
+        self._prev_predicted_next_wrench = torch.zeros(
+            n, _WRENCH_DIM, dtype=torch.float32, device=self.device,
+        )
 
     # ------------------------------------------------------------------
     # Arm trajectory advancement
@@ -335,6 +342,7 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         # Run frozen predictor if loaded
         if self._wrench_predictor is not None:
             self._run_wrench_predictor()
+            self._monitor_prediction_shift()
 
         # Run frozen CVAE encoder if loaded
         if self._cvae_encoder is not None:
@@ -395,6 +403,44 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
             self._predicted_wrench_buf[:] = self._wrench_predictor(
                 obs_step, self._arm_plan_buf,
             )
+
+    def _monitor_prediction_shift(self):
+        """Log wrench prediction RMSE to detect distribution shift.
+
+        Uses temporally-aligned comparison: the prediction for t+1 made
+        at step t-1 is compared against the ground-truth wrench at step t.
+        _prev_predicted_next_wrench stores the step-ahead prediction from
+        the previous call, so the comparison is properly aligned.
+
+        Throttled to every _pred_monitor_interval steps to avoid overhead.
+        """
+        # Always save current t+1 prediction for next step's comparison
+        current_pred_next = self._predicted_wrench_buf[:, 0:6].clone()
+
+        self._pred_monitor_counter += 1
+        if self._pred_monitor_counter < self._pred_monitor_interval:
+            self._prev_predicted_next_wrench[:] = current_pred_next
+            return
+        self._pred_monitor_counter = 0
+
+        # Compare PREVIOUS step's t+1 prediction against current wrench
+        pred = self._prev_predicted_next_wrench
+        target = self._current_wrench
+
+        residuals = pred - target
+        rmse_overall = (residuals ** 2).mean().sqrt().item()
+
+        # Force (first 3 dims) vs torque (last 3 dims)
+        rmse_force = (residuals[:, :3] ** 2).mean().sqrt().item()
+        rmse_torque = (residuals[:, 3:] ** 2).mean().sqrt().item()
+
+        if hasattr(self, "log_dict"):
+            self.log_dict["Env/pred_wrench_rmse_overall"] = rmse_overall
+            self.log_dict["Env/pred_wrench_rmse_force"] = rmse_force
+            self.log_dict["Env/pred_wrench_rmse_torque"] = rmse_torque
+
+        # Update buffer for next comparison
+        self._prev_predicted_next_wrench[:] = current_pred_next
 
     def _build_predictor_obs(self) -> torch.Tensor:
         """Assemble 115-dim predictor input from current env state.
@@ -476,6 +522,7 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         self._analytical_wrench.reset(env_ids)
         self._current_wrench[env_ids] = 0.0
         self._predicted_wrench_buf[env_ids] = 0.0
+        self._prev_predicted_next_wrench[env_ids] = 0.0
         self._cvae_latent_buf[env_ids] = 0.0
         self._arm_plan_buf[env_ids] = 0.0
         self._arm_targets[env_ids] = 0.0

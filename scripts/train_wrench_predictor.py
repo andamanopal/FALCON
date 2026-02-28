@@ -38,6 +38,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 # ---------------------------------------------------------------------------
+# Optional WandB (graceful fallback if not installed)
+# ---------------------------------------------------------------------------
+try:
+    import wandb
+    _HAS_WANDB = True
+except ImportError:
+    wandb = None
+    _HAS_WANDB = False
+
+# ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
 logging.basicConfig(
@@ -236,6 +246,92 @@ def print_per_component_table(metrics: dict):
 # Training loop
 # ---------------------------------------------------------------------------
 
+def _init_wandb(args, n_train: int, n_val: int, num_params: int):
+    """Initialize WandB run if available and not disabled."""
+    use_wandb = _HAS_WANDB and not args.no_wandb
+    if not use_wandb:
+        if not _HAS_WANDB and not args.no_wandb:
+            log.info("WandB not installed — logging to console only.")
+        return False
+
+    run_name = args.wandb_run_name or f"wrench_predictor_{Path(args.data_path).stem}"
+    wandb.init(
+        entity=args.wandb_entity,
+        project=args.wandb_project,
+        name=run_name,
+        config={
+            "model": "WrenchPredictor",
+            "data_path": args.data_path,
+            "save_path": args.save_path,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "patience": args.patience,
+            "device": args.device,
+            "n_train": n_train,
+            "n_val": n_val,
+            "num_params": num_params,
+            "obs_dim": OBS_DIM,
+            "plan_dim": PLAN_DIM,
+            "output_dim": OUTPUT_DIM,
+            "horizon": HORIZON,
+        },
+    )
+    log.info(f"WandB initialized: {wandb.run.url}")
+    return True
+
+
+def _log_wandb_epoch(epoch, train_loss, val_loss, lr, best_val_loss):
+    """Log per-epoch metrics to WandB."""
+    wandb.log({
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "learning_rate": lr,
+        "best_val_loss": best_val_loss,
+    }, step=epoch)
+
+
+def _log_wandb_final(metrics):
+    """Log end-of-training per-component metrics to WandB."""
+    rmse = metrics["rmse_per_comp"]
+    r2 = metrics["r2_per_comp"]
+    corr = metrics["correlation_per_comp"]
+    dim_names = ["fx", "fy", "fz", "tx", "ty", "tz"]
+
+    summary = {
+        "final/rmse_total": metrics["rmse_total"],
+        "final/r2_total": metrics["r2_total"],
+        "final/corr_total": corr.mean().item(),
+    }
+
+    # Per-step and per-component
+    force_rmse_accum, torque_rmse_accum = [], []
+    force_r2_accum, torque_r2_accum = [], []
+    for step in range(HORIZON):
+        for dim_idx, dim_name in enumerate(dim_names):
+            comp_idx = step * WRENCH_DIM + dim_idx
+            prefix = f"final/step{step+1}/{dim_name}"
+            summary[f"{prefix}/rmse"] = rmse[comp_idx].item()
+            summary[f"{prefix}/r2"] = r2[comp_idx].item()
+            summary[f"{prefix}/corr"] = corr[comp_idx].item()
+
+            if dim_idx < 3:
+                force_rmse_accum.append(rmse[comp_idx].item())
+                force_r2_accum.append(r2[comp_idx].item())
+            else:
+                torque_rmse_accum.append(rmse[comp_idx].item())
+                torque_r2_accum.append(r2[comp_idx].item())
+
+    # Force vs torque aggregates
+    summary["final/rmse_force"] = sum(force_rmse_accum) / len(force_rmse_accum)
+    summary["final/rmse_torque"] = sum(torque_rmse_accum) / len(torque_rmse_accum)
+    summary["final/r2_force"] = sum(force_r2_accum) / len(force_r2_accum)
+    summary["final/r2_torque"] = sum(torque_r2_accum) / len(torque_r2_accum)
+
+    for key, val in summary.items():
+        wandb.run.summary[key] = val
+
+
 def train(args):
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
@@ -289,6 +385,11 @@ def train(args):
         wrench_std.to(device),
     )
     log.info(f"Model parameters: {model.num_parameters():,}")
+
+    # ------------------------------------------------------------------
+    # WandB initialization
+    # ------------------------------------------------------------------
+    use_wandb = _init_wandb(args, n_train, n_val, model.num_parameters())
 
     # ------------------------------------------------------------------
     # Optimizer and scheduler
@@ -385,6 +486,12 @@ def train(args):
             f"time={elapsed:.1f}s"
         )
 
+        if use_wandb:
+            _log_wandb_epoch(
+                epoch, avg_train_loss, avg_val_loss,
+                scheduler.get_last_lr()[0], best_val_loss,
+            )
+
         # ---- Early stopping ----
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -433,6 +540,9 @@ def train(args):
     log.info("Per-component breakdown:")
     print_per_component_table(metrics)
 
+    if use_wandb:
+        _log_wandb_final(metrics)
+
     # ------------------------------------------------------------------
     # Save checkpoint
     # ------------------------------------------------------------------
@@ -475,6 +585,9 @@ def train(args):
     log.info(
         f"Load with: model.load_frozen('{save_path}')"
     )
+
+    if use_wandb:
+        wandb.finish()
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +634,29 @@ def parse_args():
         type=str,
         default="cuda",
         help="Compute device: 'cuda', 'cuda:0', 'cpu', etc.",
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default="andaman-l",
+        help="WandB entity (team or username).",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="AnticiPose",
+        help="WandB project name.",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="WandB run name (auto-generated if omitted).",
+    )
+    parser.add_argument(
+        "--no_wandb",
+        action="store_true",
+        help="Disable WandB logging even if installed.",
     )
     return parser.parse_args()
 
