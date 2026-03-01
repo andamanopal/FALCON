@@ -142,9 +142,26 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
             self._wrench_predictor = self._load_wrench_predictor(
                 predictor_ckpt,
             )
+            # Validate predictor obs_dim matches env config
+            enhanced = getattr(
+                self.config, "use_enhanced_predictor_obs", False,
+            )
+            expected_obs_dim = 123 if enhanced else 115
+            if (
+                hasattr(self._wrench_predictor, "_obs_dim")
+                and self._wrench_predictor._obs_dim != expected_obs_dim
+            ):
+                raise ValueError(
+                    f"Predictor obs_dim={self._wrench_predictor._obs_dim} "
+                    f"doesn't match env config "
+                    f"(use_enhanced_predictor_obs={enhanced}, "
+                    f"expected obs_dim={expected_obs_dim}). "
+                    f"Use a predictor trained with matching obs."
+                )
             logger.info(
                 f"[AnticiPoseEnv] Loaded wrench predictor "
-                f"from {predictor_ckpt!r}"
+                f"from {predictor_ckpt!r} "
+                f"(obs_dim={expected_obs_dim})"
             )
         elif self._ap_mode == "anticipose":
             logger.warning(
@@ -476,10 +493,16 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         ]                                                   # = 115
 
         if getattr(self.config, "use_enhanced_predictor_obs", False):
+            # Compute foot contacts directly from simulator contact forces.
+            # Cannot rely on self.last_contacts_filt because it is only
+            # updated inside a reward function that may be disabled.
+            foot_contact = (
+                self.simulator.contact_forces[:, self.feet_indices, 2] > 1.0
+            ).float()                                               # (N, 2)
             parts.extend([
                 torch.sin(_TWO_PI * self.phase_time).unsqueeze(1),  # 1
                 torch.cos(_TWO_PI * self.phase_time).unsqueeze(1),  # 1
-                self.last_contacts_filt.float(),                    # 2
+                foot_contact,                                       # 2
                 self.base_lin_vel,                                  # 3
                 self._payload_mass.unsqueeze(1),                    # 1
             ])                                                      # +8 = 123
