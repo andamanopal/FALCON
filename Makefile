@@ -39,8 +39,10 @@ PROJECT         ?= anticipose_overnight
 # Predictor/CVAE training (increase PRED_EPOCHS for longer training to
 # improve R²; the default 100 may bottleneck before convergence).
 PRED_EPOCHS     ?= 100
+PRED_V2_EPOCHS  ?= 500
 PRED_BATCH      ?= 4096
 PRED_PATIENCE   ?= 10
+PRED_V2_PATIENCE ?= 20
 WANDB_ENTITY    ?= andaman-l
 WANDB_PROJECT   ?= AnticiPose
 COLLECT_SAMPLES ?= 500000
@@ -97,7 +99,7 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 .PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b5c train-b6
 .PHONY: train-pipeline train-pipeline-tmux pipeline-status pipeline-resume
 .PHONY: collect-wrench train-predictor eval-predictor train-cvae
-.PHONY: collect-wrench-v2 train-predictor-v2 train-b5c-v2
+.PHONY: collect-wrench-v2 train-predictor-v2 eval-predictor-v2 train-b5c-v2
 .PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b5c-v2 eval-b6
 .PHONY: smoke-test retrain-b5
 .PHONY: sync-wandb results
@@ -258,21 +260,33 @@ collect-wrench-v2:
 	  +num_samples=$(COLLECT_SAMPLES) \
 	  headless=true
 
-## train-predictor-v2: Train wrench predictor on enhanced 123D obs data
+## train-predictor-v2: Train wrench predictor on enhanced 123D obs data (500 epochs, patience 20)
 train-predictor-v2:
 	@test -f "$(LOG_DIR)/$(PROJECT)/wrench_data_v2_seed$(SEED).pt" || \
 	  (echo "ERROR: Enhanced wrench data not found. Run: make collect-wrench-v2" && exit 1)
 	python scripts/train_wrench_predictor.py \
 	  --data_path $(LOG_DIR)/$(PROJECT)/wrench_data_v2_seed$(SEED).pt \
 	  --save_path $(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt \
-	  --epochs $(PRED_EPOCHS) \
+	  --epochs $(PRED_V2_EPOCHS) \
 	  --batch_size $(PRED_BATCH) \
-	  --patience $(PRED_PATIENCE) \
+	  --patience $(PRED_V2_PATIENCE) \
 	  --device cuda \
 	  --wandb_entity $(WANDB_ENTITY) \
 	  --wandb_project $(WANDB_PROJECT) \
-	  --wandb_run_name wrench_pred_v2_seed$(SEED)_ep$(PRED_EPOCHS) \
+	  --wandb_run_name wrench_pred_v2_seed$(SEED)_ep$(PRED_V2_EPOCHS) \
 	  $(if $(PRED_PLAN_DERIV),--use_plan_derivatives,)
+
+## eval-predictor-v2: Evaluate v2 wrench predictor (123D obs) on matching v2 data
+eval-predictor-v2:
+	@test -f "$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt" || \
+	  (echo "ERROR: v2 predictor not found. Run: make train-predictor-v2" && exit 1)
+	python scripts/train_wrench_predictor.py \
+	  --eval_only \
+	  --checkpoint $(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt \
+	  --data_path $(LOG_DIR)/$(PROJECT)/wrench_data_v2_seed$(SEED).pt \
+	  --batch_size $(PRED_BATCH) \
+	  --device cuda \
+	  --no_wandb
 
 ## train-b5c-v2: Train B5c with improved predictor (enhanced 123D obs)
 train-b5c-v2:
