@@ -61,11 +61,14 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Dimension constants (from VERIFIED_PARAMS.md)
 # ---------------------------------------------------------------------------
-OBS_DIM    = 115
-PLAN_DIM   = 70
-WRENCH_DIM = 6
-OUTPUT_DIM = 30   # H=5 x WRENCH_DIM
-HORIZON    = OUTPUT_DIM // WRENCH_DIM  # 5
+OBS_DIM      = 115
+PLAN_DIM     = 70
+WRENCH_DIM   = 6
+OUTPUT_DIM   = 30   # H=5 x WRENCH_DIM
+HORIZON      = OUTPUT_DIM // WRENCH_DIM  # 5
+ARM_JOINTS   = 14
+PLAN_VEL_DIM = (HORIZON - 1) * ARM_JOINTS   # 56
+PLAN_ACC_DIM = (HORIZON - 2) * ARM_JOINTS   # 42
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +141,31 @@ def load_dataset(data_path: str, device: torch.device):
     return obs, plan, wrench_target
 
 
-def compute_normalization_stats(obs: torch.Tensor, plan: torch.Tensor, wrench: torch.Tensor):
+def compute_plan_derivatives(plan: torch.Tensor):
+    """Compute finite-difference velocity and acceleration from arm plan.
+
+    Args:
+        plan (torch.Tensor): Shape (N, 70) — H=5 steps x 14 joints.
+
+    Returns:
+        plan_vel (torch.Tensor): Shape (N, 56) — 4 steps x 14 joints.
+        plan_acc (torch.Tensor): Shape (N, 42) — 3 steps x 14 joints.
+    """
+    B = plan.shape[0]
+    steps = plan.view(B, HORIZON, ARM_JOINTS)         # (N, 5, 14)
+    vel = (steps[:, 1:] - steps[:, :-1])               # (N, 4, 14)
+    acc = (vel[:, 1:] - vel[:, :-1])                    # (N, 3, 14)
+    return vel.reshape(B, -1), acc.reshape(B, -1)
+
+
+def compute_normalization_stats(obs: torch.Tensor, plan: torch.Tensor,
+                                wrench: torch.Tensor,
+                                use_plan_derivatives: bool = False):
     """Compute z-score (mean, std) over the training split tensors.
 
-    Returns six tensors: obs_mean, obs_std, plan_mean, plan_std,
-                         wrench_mean, wrench_std
-    All shapes match their respective input's last dimension.
+    Returns a dict with keys: obs_mean, obs_std, plan_mean, plan_std,
+    wrench_mean, wrench_std, and optionally plan_vel_mean/std,
+    plan_acc_mean/std when use_plan_derivatives is True.
     """
     def _stats(x):
         mean = x.mean(dim=0)
@@ -166,7 +188,31 @@ def compute_normalization_stats(obs: torch.Tensor, plan: torch.Tensor, wrench: t
         f"  wrench mean/std range: [{wrench_mean.min():.4f}, {wrench_mean.max():.4f}] / "
         f"[{wrench_std.min():.4f}, {wrench_std.max():.4f}]"
     )
-    return obs_mean, obs_std, plan_mean, plan_std, wrench_mean, wrench_std
+
+    result = {
+        "obs_mean": obs_mean, "obs_std": obs_std,
+        "plan_mean": plan_mean, "plan_std": plan_std,
+        "wrench_mean": wrench_mean, "wrench_std": wrench_std,
+    }
+
+    if use_plan_derivatives:
+        plan_vel, plan_acc = compute_plan_derivatives(plan)
+        vel_mean, vel_std = _stats(plan_vel)
+        acc_mean, acc_std = _stats(plan_acc)
+        log.info(
+            f"  plan_vel mean/std range: [{vel_mean.min():.4f}, {vel_mean.max():.4f}] / "
+            f"[{vel_std.min():.4f}, {vel_std.max():.4f}]"
+        )
+        log.info(
+            f"  plan_acc mean/std range: [{acc_mean.min():.4f}, {acc_mean.max():.4f}] / "
+            f"[{acc_std.min():.4f}, {acc_std.max():.4f}]"
+        )
+        result.update({
+            "plan_vel_mean": vel_mean, "plan_vel_std": vel_std,
+            "plan_acc_mean": acc_mean, "plan_acc_std": acc_std,
+        })
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -398,10 +444,15 @@ def evaluate(args):
     )
 
     WrenchPredictor = _load_predictor_class()
-    model = WrenchPredictor().to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    # Auto-detect whether checkpoint used plan derivatives
+    state_dict = ckpt["model_state_dict"]
+    use_deriv = "plan_vel_mean" in state_dict
+    model = WrenchPredictor(use_plan_derivatives=use_deriv).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
     log.info(f"Model parameters: {model.num_parameters():,}")
+    if use_deriv:
+        log.info(f"  Plan derivatives detected (input_dim={model._input_dim})")
 
     all_pred = []
     all_target = []
@@ -463,25 +514,39 @@ def train(args):
     # ------------------------------------------------------------------
     # Normalization statistics (training split only)
     # ------------------------------------------------------------------
-    log.info("Computing normalization statistics on training split ...")
-    obs_mean, obs_std, plan_mean, plan_std, wrench_mean, wrench_std = (
-        compute_normalization_stats(obs_train_raw, plan_train_raw, wrench_train_raw)
+    use_deriv = args.use_plan_derivatives
+    log.info(f"Computing normalization statistics on training split "
+             f"(plan_derivatives={use_deriv}) ...")
+    norm_stats = compute_normalization_stats(
+        obs_train_raw, plan_train_raw, wrench_train_raw,
+        use_plan_derivatives=use_deriv,
     )
 
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
     WrenchPredictor = _load_predictor_class()
-    model = WrenchPredictor().to(device)
+    model = WrenchPredictor(use_plan_derivatives=use_deriv).to(device)
+    deriv_kwargs = {}
+    if use_deriv:
+        deriv_kwargs = {
+            "plan_vel_mean": norm_stats["plan_vel_mean"].to(device),
+            "plan_vel_std":  norm_stats["plan_vel_std"].to(device),
+            "plan_acc_mean": norm_stats["plan_acc_mean"].to(device),
+            "plan_acc_std":  norm_stats["plan_acc_std"].to(device),
+        }
     model.set_normalization_stats(
-        obs_mean.to(device),
-        obs_std.to(device),
-        plan_mean.to(device),
-        plan_std.to(device),
-        wrench_mean.to(device),
-        wrench_std.to(device),
+        obs_mean=norm_stats["obs_mean"].to(device),
+        obs_std=norm_stats["obs_std"].to(device),
+        plan_mean=norm_stats["plan_mean"].to(device),
+        plan_std=norm_stats["plan_std"].to(device),
+        wrench_mean=norm_stats["wrench_mean"].to(device),
+        wrench_std=norm_stats["wrench_std"].to(device),
+        **deriv_kwargs,
     )
     log.info(f"Model parameters: {model.num_parameters():,}")
+    if use_deriv:
+        log.info(f"  Plan derivatives ENABLED (input_dim={model._input_dim})")
 
     # ------------------------------------------------------------------
     # WandB initialization
@@ -661,20 +726,14 @@ def train(args):
                 "patience":    args.patience,
                 "n_train":     n_train,
                 "n_val":       n_val,
+                "use_plan_derivatives": use_deriv,
             },
             "metrics": {
                 "rmse_total": metrics["rmse_total"],
                 "r2_total":   metrics["r2_total"],
                 "best_val_loss": best_val_loss,
             },
-            "normalization_stats": {
-                "obs_mean":    obs_mean,
-                "obs_std":     obs_std,
-                "plan_mean":   plan_mean,
-                "plan_std":    plan_std,
-                "wrench_mean": wrench_mean,
-                "wrench_std":  wrench_std,
-            },
+            "normalization_stats": norm_stats,
         },
         save_path,
     )
@@ -754,6 +813,12 @@ def parse_args():
         "--no_wandb",
         action="store_true",
         help="Disable WandB logging even if installed.",
+    )
+    parser.add_argument(
+        "--use_plan_derivatives",
+        action="store_true",
+        help="Augment predictor input with finite-difference velocity and "
+             "acceleration of the arm plan (185D -> 283D input).",
     )
     parser.add_argument(
         "--eval_only",

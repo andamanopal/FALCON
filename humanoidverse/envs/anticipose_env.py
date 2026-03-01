@@ -593,9 +593,9 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
             pass
 
         from humanoidverse.models.wrench_predictor import WrenchPredictor
-        predictor = WrenchPredictor().to(self.device)
-        predictor.load_frozen(ckpt_path)
-        logger.info("[AnticiPoseEnv] Loaded state-dict wrench predictor.")
+        predictor = WrenchPredictor.from_checkpoint(ckpt_path, device=self.device)
+        deriv_str = " (with plan derivatives)" if predictor._use_plan_derivatives else ""
+        logger.info(f"[AnticiPoseEnv] Loaded state-dict wrench predictor{deriv_str}.")
         return predictor
 
     # ------------------------------------------------------------------

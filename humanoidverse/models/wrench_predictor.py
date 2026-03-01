@@ -6,19 +6,17 @@ proprioceptive observation and the arm motion plan.
 
 Architecture
 ~~~~~~~~~~~~
-Input  : obs (115) concatenated with arm plan (70)  -> 185 dims
-Hidden : Linear(185->256) + LayerNorm(256) + ELU
+Base input : obs (115) concatenated with arm plan (70) -> 185 dims
+Enhanced   : + plan velocity (56) + plan acceleration (42) -> 283 dims
+             (enabled via use_plan_derivatives=True)
+
+Hidden : Linear(input_dim->256) + LayerNorm(256) + ELU
          Linear(256->256) + LayerNorm(256) + ELU
          Linear(256->128) + LayerNorm(128) + ELU
 Output : Linear(128->30)   (H=5 x 6-dim wrench: force_xyz + torque_xyz)
 
-Parameter count: ~152K  (verified analytically below)
-    185*256 + 256 = 47,616 + 256 = 47,872
-    256*256 + 256 = 65,792 + 256 = 66,048
-    256*128 + 128 = 32,896 + 128 = 33,024
-    128*30  +  30 =  3,870 +  30 =  3,900
-    LayerNorm params (weight+bias): 256+256+256+256+128+128 = 1,280
-    Total: 152,124
+Parameter count (base 185D): ~152K
+Parameter count (enhanced 283D): ~177K (+25K from wider first layer)
 
 Z-score normalisation statistics are stored as non-trainable buffers so that
 they are saved/loaded with the model state-dict and transferred to any device
@@ -46,6 +44,13 @@ INPUT_DIM = OBS_DIM + PLAN_DIM   # 185
 HIDDEN    = [256, 256, 128]
 OUTPUT_DIM = 30   # H=5 x 6 (force_xyz + torque_xyz per step)
 
+# Plan derivative dimensions (finite-difference velocity & acceleration)
+ARM_JOINTS   = 14
+HORIZON      = PLAN_DIM // ARM_JOINTS       # 5
+PLAN_VEL_DIM = (HORIZON - 1) * ARM_JOINTS   # 4 * 14 = 56
+PLAN_ACC_DIM = (HORIZON - 2) * ARM_JOINTS   # 3 * 14 = 42
+ENHANCED_INPUT_DIM = INPUT_DIM + PLAN_VEL_DIM + PLAN_ACC_DIM  # 283
+
 
 class WrenchPredictor(nn.Module):
     """Frozen MLP wrench predictor.
@@ -66,15 +71,17 @@ class WrenchPredictor(nn.Module):
         wrench_std  (OUTPUT_DIM,): inverse-normalisation std  for output
     """
 
-    def __init__(self, input_dim=INPUT_DIM, output_dim=OUTPUT_DIM, plan_dim=PLAN_DIM):
+    def __init__(self, input_dim=None, output_dim=OUTPUT_DIM, plan_dim=PLAN_DIM,
+                 use_plan_derivatives=False):
         super().__init__()
 
-        # Store dims for introspection
+        self._use_plan_derivatives = use_plan_derivatives
+
+        # Resolve input_dim: enhanced (283) when using derivatives, else 185
+        if input_dim is None:
+            input_dim = ENHANCED_INPUT_DIM if use_plan_derivatives else INPUT_DIM
         self._input_dim = input_dim
         self._output_dim = output_dim
-
-        # Derive obs dim from input_dim and plan_dim
-        obs_dim = input_dim - plan_dim
 
         # ------------------------------------------------------------------
         # Network layers
@@ -101,12 +108,19 @@ class WrenchPredictor(nn.Module):
         # moved with .to(device), but not updated by optimisers).
         # Defaults: identity transform (mean=0, std=1).
         # ------------------------------------------------------------------
-        self.register_buffer("obs_mean",    torch.zeros(obs_dim))
-        self.register_buffer("obs_std",     torch.ones(obs_dim))
+        self.register_buffer("obs_mean",    torch.zeros(OBS_DIM))
+        self.register_buffer("obs_std",     torch.ones(OBS_DIM))
         self.register_buffer("plan_mean",   torch.zeros(plan_dim))
         self.register_buffer("plan_std",    torch.ones(plan_dim))
         self.register_buffer("wrench_mean", torch.zeros(output_dim))
         self.register_buffer("wrench_std",  torch.ones(output_dim))
+
+        # Plan derivative normalisation buffers (only when enabled)
+        if use_plan_derivatives:
+            self.register_buffer("plan_vel_mean", torch.zeros(PLAN_VEL_DIM))
+            self.register_buffer("plan_vel_std",  torch.ones(PLAN_VEL_DIM))
+            self.register_buffer("plan_acc_mean", torch.zeros(PLAN_ACC_DIM))
+            self.register_buffer("plan_acc_std",  torch.ones(PLAN_ACC_DIM))
 
     # ------------------------------------------------------------------
     # Forward pass
@@ -119,6 +133,11 @@ class WrenchPredictor(nn.Module):
         inverse-normalisation to the outputs so callers work with raw
         (unscaled) quantities.
 
+        When ``use_plan_derivatives=True``, finite-difference velocity and
+        acceleration of the arm plan are computed on-the-fly and concatenated
+        to the input, providing the network with the kinematic derivatives
+        that directly relate to wrench via Newton-Euler (F=ma, tau=I*alpha).
+
         Args:
             obs  (torch.Tensor): Shape (B, 115).  Raw per-step actor obs.
             plan (torch.Tensor): Shape (B,  70).  Arm plan (H=5 x 14 joints).
@@ -130,12 +149,41 @@ class WrenchPredictor(nn.Module):
         obs_n  = self._normalize(obs,  self.obs_mean,  self.obs_std)
         plan_n = self._normalize(plan, self.plan_mean, self.plan_std)
 
-        x = torch.cat([obs_n, plan_n], dim=-1)  # (B, 185)
-        out_n = self.net(x)                       # (B, 30)  normalised output
+        if self._use_plan_derivatives:
+            plan_vel, plan_acc = self._compute_plan_derivatives(plan)
+            plan_vel_n = self._normalize(plan_vel, self.plan_vel_mean, self.plan_vel_std)
+            plan_acc_n = self._normalize(plan_acc, self.plan_acc_mean, self.plan_acc_std)
+            x = torch.cat([obs_n, plan_n, plan_vel_n, plan_acc_n], dim=-1)  # (B, 283)
+        else:
+            x = torch.cat([obs_n, plan_n], dim=-1)  # (B, 185)
+
+        out_n = self.net(x)  # (B, 30)  normalised output
 
         # Inverse-normalise to recover physical-unit predictions.
         wrench = out_n * self.wrench_std + self.wrench_mean
         return wrench
+
+    @staticmethod
+    def _compute_plan_derivatives(plan: torch.Tensor):
+        """Compute finite-difference velocity and acceleration from arm plan.
+
+        The plan tensor contains H=5 steps of 14 joint positions.  Velocity
+        is the first difference (4 steps) and acceleration is the second
+        difference (3 steps).  No dt division is needed because z-score
+        normalisation absorbs the scale factor.
+
+        Args:
+            plan (torch.Tensor): Shape (B, 70).
+
+        Returns:
+            plan_vel (torch.Tensor): Shape (B, 56) — 4 steps x 14 joints.
+            plan_acc (torch.Tensor): Shape (B, 42) — 3 steps x 14 joints.
+        """
+        B = plan.shape[0]
+        steps = plan.view(B, HORIZON, ARM_JOINTS)                 # (B, 5, 14)
+        vel = (steps[:, 1:] - steps[:, :-1])                      # (B, 4, 14)
+        acc = (vel[:, 1:] - vel[:, :-1])                           # (B, 3, 14)
+        return vel.reshape(B, -1), acc.reshape(B, -1)
 
     # ------------------------------------------------------------------
     # Normalisation helpers
@@ -154,19 +202,15 @@ class WrenchPredictor(nn.Module):
         plan_std:    torch.Tensor,
         wrench_mean: torch.Tensor,
         wrench_std:  torch.Tensor,
+        plan_vel_mean: torch.Tensor = None,
+        plan_vel_std:  torch.Tensor = None,
+        plan_acc_mean: torch.Tensor = None,
+        plan_acc_std:  torch.Tensor = None,
     ) -> None:
         """Set z-score statistics from training data.
 
         Call this once after computing dataset statistics, before saving the
         checkpoint.  All tensors are moved to the buffer's current device.
-
-        Args:
-            obs_mean    (OBS_DIM,)
-            obs_std     (OBS_DIM,)
-            plan_mean   (PLAN_DIM,)
-            plan_std    (PLAN_DIM,)
-            wrench_mean (OUTPUT_DIM,)
-            wrench_std  (OUTPUT_DIM,)
         """
         device = self.obs_mean.device
         self.obs_mean.copy_(obs_mean.to(device))
@@ -176,9 +220,54 @@ class WrenchPredictor(nn.Module):
         self.wrench_mean.copy_(wrench_mean.to(device))
         self.wrench_std.copy_(wrench_std.to(device))
 
+        if self._use_plan_derivatives and plan_vel_mean is not None:
+            self.plan_vel_mean.copy_(plan_vel_mean.to(device))
+            self.plan_vel_std.copy_(plan_vel_std.to(device))
+            self.plan_acc_mean.copy_(plan_acc_mean.to(device))
+            self.plan_acc_std.copy_(plan_acc_std.to(device))
+
     # ------------------------------------------------------------------
     # Frozen-model loading
     # ------------------------------------------------------------------
+
+    @classmethod
+    def from_checkpoint(cls, path: str, device: str = "cpu") -> "WrenchPredictor":
+        """Auto-detect configuration from checkpoint and load frozen model.
+
+        Inspects the state dict to determine whether the checkpoint was
+        trained with plan derivatives (presence of ``plan_vel_mean`` buffer)
+        and constructs the model with matching architecture.
+
+        Args:
+            path:   Path to checkpoint file.
+            device: Target device.
+
+        Returns:
+            A frozen WrenchPredictor on the requested device.
+        """
+        checkpoint_path = Path(path)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+
+        raw = torch.load(path, map_location="cpu", weights_only=True)
+        if isinstance(raw, dict):
+            if "model_state_dict" in raw:
+                state_dict = raw["model_state_dict"]
+            elif "state_dict" in raw:
+                state_dict = raw["state_dict"]
+            else:
+                state_dict = raw
+        else:
+            raise KeyError(
+                f"Unexpected checkpoint type: {type(raw)}. "
+                "Expected a dict with 'model_state_dict' or 'state_dict'."
+            )
+
+        use_derivatives = "plan_vel_mean" in state_dict
+        model = cls(use_plan_derivatives=use_derivatives).to(device)
+        model.load_state_dict(state_dict, strict=True)
+        model._freeze()
+        return model
 
     def load_frozen(self, path: str) -> None:
         """Load weights from a checkpoint and freeze the model.

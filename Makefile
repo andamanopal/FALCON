@@ -185,6 +185,7 @@ collect-wrench:
 	  headless=true
 
 ## train-predictor: Train wrench predictor MLP from collected data
+##   Pass PRED_PLAN_DERIV=1 to enable plan derivative features (vel+acc)
 train-predictor:
 	@test -f "$(WRENCH_DATA)" || (echo "ERROR: Wrench data not found at $(WRENCH_DATA). Run: make collect-wrench" && exit 1)
 	python scripts/train_wrench_predictor.py \
@@ -196,7 +197,8 @@ train-predictor:
 	  --device cuda \
 	  --wandb_entity $(WANDB_ENTITY) \
 	  --wandb_project $(WANDB_PROJECT) \
-	  --wandb_run_name wrench_pred_seed$(SEED)_ep$(PRED_EPOCHS)
+	  --wandb_run_name wrench_pred_seed$(SEED)_ep$(PRED_EPOCHS) \
+	  $(if $(PRED_PLAN_DERIV),--use_plan_derivatives,)
 
 ## eval-predictor: Evaluate a trained wrench predictor checkpoint (prints R², RMSE, per-component table)
 eval-predictor:
