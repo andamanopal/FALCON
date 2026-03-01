@@ -411,6 +411,18 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         """CVAE latent encoding of arm plan. Shape: (N, 30). Used by B6."""
         return self._cvae_latent_buf
 
+    def _get_obs_predicted_wrench_delta(self) -> torch.Tensor:
+        """Predicted wrench delta from current. Shape: (N, H*6=30). Used by B5c-delta."""
+        return self._predicted_wrench_buf - self._current_wrench.repeat(1, self._ap_horizon)
+
+    def _get_obs_predicted_wrench_h1(self) -> torch.Tensor:
+        """Next-step predicted wrench only. Shape: (N, 6). Used by B5c-h1."""
+        return self._predicted_wrench_buf[:, :6]
+
+    def _get_obs_predicted_wrench_delta_h1(self) -> torch.Tensor:
+        """Next-step predicted wrench delta from current. Shape: (N, 6). Used by B5c-h1-delta."""
+        return self._predicted_wrench_buf[:, :6] - self._current_wrench
+
     # ------------------------------------------------------------------
     # Wrench predictor inference
     # ------------------------------------------------------------------

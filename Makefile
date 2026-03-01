@@ -80,6 +80,9 @@ OBS_DIRECT_PLAN   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_di
 OBS_DIRECT_CRIT   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_critic
 OBS_ANTICIPOSE    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
 OBS_ANTICIPOSE_CW = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose_current_wrench
+OBS_ANTICIPOSE_CW_DELTA  = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose_cw_delta
+OBS_ANTICIPOSE_CW_H1     = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose_cw_h1
+OBS_ANTICIPOSE_CW_H1D    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose_cw_h1_delta
 OBS_CVAE          = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_cvae
 
 # Eval command
@@ -96,11 +99,11 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 .DEFAULT_GOAL := help
 
 .PHONY: help
-.PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b5c train-b6
+.PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b5c train-b5c-delta train-b5c-h1 train-b5c-h1-delta train-b6
 .PHONY: train-pipeline train-pipeline-tmux pipeline-status pipeline-resume
 .PHONY: collect-wrench train-predictor eval-predictor train-cvae
 .PHONY: collect-wrench-v2 train-predictor-v2 eval-predictor-v2 train-b5c-v2
-.PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b5c-v2 eval-b6
+.PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b5c-v2 eval-b5c-delta eval-b5c-h1 eval-b5c-h1-delta eval-b6
 .PHONY: smoke-test retrain-b5
 .PHONY: sync-wandb results
 
@@ -166,6 +169,42 @@ train-b5c:
 	  experiment_name=B5c_anticipose_cw_seed$(SEED) \
 	  env.config.anticipose_mode=anticipose \
 	  ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## train-b5c-delta: Train B5c with delta prediction (predicted - current). Graceful degradation to B3.
+train-b5c-delta:
+	@PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	test -f "$$PRED_V2" || (echo "ERROR: v2 predictor not found at $$PRED_V2. Run: make train-predictor-v2" && exit 1) && \
+	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE_CW_DELTA) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B5c_delta_seed$(SEED) \
+	  env.config.anticipose_mode=anticipose \
+	  env.config.use_enhanced_predictor_obs=true \
+	  ++env.config.wrench_predictor_ckpt=$$PRED_V2 \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## train-b5c-h1: Train B5c with H=1 only (next-step prediction, 6D). Less noise.
+train-b5c-h1:
+	@PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	test -f "$$PRED_V2" || (echo "ERROR: v2 predictor not found at $$PRED_V2. Run: make train-predictor-v2" && exit 1) && \
+	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE_CW_H1) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B5c_h1_seed$(SEED) \
+	  env.config.anticipose_mode=anticipose \
+	  env.config.use_enhanced_predictor_obs=true \
+	  ++env.config.wrench_predictor_ckpt=$$PRED_V2 \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## train-b5c-h1-delta: Train B5c with H=1 delta (both fixes combined). Best candidate.
+train-b5c-h1-delta:
+	@PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	test -f "$$PRED_V2" || (echo "ERROR: v2 predictor not found at $$PRED_V2. Run: make train-predictor-v2" && exit 1) && \
+	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE_CW_H1D) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B5c_h1_delta_seed$(SEED) \
+	  env.config.anticipose_mode=anticipose \
+	  env.config.use_enhanced_predictor_obs=true \
+	  ++env.config.wrench_predictor_ckpt=$$PRED_V2 \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
 
 ## train-b6: Train B6 CVAE latent (requires CVAE checkpoint)
@@ -636,6 +675,72 @@ eval-b5c-v2:
 	$(EVAL_CMD) \
 	  --checkpoint $${B5C_V2_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B5c_v2_anticipose_cw_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --wrench_predictor_ckpt $$PRED_V2 \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
+
+## eval-b5c-delta: Evaluate B5c delta variant
+eval-b5c-delta:
+	@B5CD_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5c_delta_seed$(SEED)* 2>/dev/null | head -1) && \
+	PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	if [ -z "$$B5CD_DIR" ]; then echo "SKIP: B5c-delta not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5CD_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_delta_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --wrench_predictor_ckpt $$PRED_V2 \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5CD_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_delta_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --wrench_predictor_ckpt $$PRED_V2 \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
+
+## eval-b5c-h1: Evaluate B5c H=1 variant
+eval-b5c-h1:
+	@B5CH1_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5c_h1_seed$(SEED)* 2>/dev/null | head -1) && \
+	PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	if [ -z "$$B5CH1_DIR" ]; then echo "SKIP: B5c-h1 not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5CH1_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_h1_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --wrench_predictor_ckpt $$PRED_V2 \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5CH1_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_h1_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --wrench_predictor_ckpt $$PRED_V2 \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
+
+## eval-b5c-h1-delta: Evaluate B5c H=1 delta variant (both fixes combined)
+eval-b5c-h1-delta:
+	@B5CH1D_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5c_h1_delta_seed$(SEED)* 2>/dev/null | head -1) && \
+	PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	if [ -z "$$B5CH1D_DIR" ]; then echo "SKIP: B5c-h1-delta not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5CH1D_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_h1_delta_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --wrench_predictor_ckpt $$PRED_V2 \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5CH1D_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_h1_delta_heldout_s$(SEED) \
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
