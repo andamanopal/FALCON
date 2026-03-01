@@ -36,6 +36,7 @@ from humanoidverse.envs.decoupled_locomotion.decoupled_locomotion_stand_height_w
 from humanoidverse.envs.arm_trajectory_generators import RandomTaskSampler, TASK_REGISTRY
 from humanoidverse.utils.analytical_wrench import AnalyticalWrench
 
+import math
 import torch
 from typing import Optional
 from loguru import logger
@@ -43,6 +44,7 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 # Constants (verified against VERIFIED_PARAMS.md)
 # ---------------------------------------------------------------------------
+_TWO_PI = 2.0 * math.pi
 _WRENCH_DIM = 6           # Fx, Fy, Fz, Tx, Ty, Tz
 _ARM_JOINTS = 14           # 7 left + 7 right
 _ARM_DOF_START = 15        # First arm DOF index in 29-DOF config
@@ -172,11 +174,15 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
                 WrenchDataCollector,
             )
             capacity = getattr(self.config, "collect_buffer_size", 500_000)
+            obs_dim = 123 if getattr(
+                self.config, "use_enhanced_predictor_obs", False,
+            ) else 115
             self._wrench_collector = WrenchDataCollector(
                 num_envs=self.num_envs,
                 horizon=self._ap_horizon,
                 capacity=capacity,
                 device=device,
+                obs_dim=obs_dim,
             )
             logger.info(
                 f"[AnticiPoseEnv] Wrench data collection enabled "
@@ -443,15 +449,19 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         self._prev_predicted_next_wrench[:] = current_pred_next
 
     def _build_predictor_obs(self) -> torch.Tensor:
-        """Assemble 115-dim predictor input from current env state.
+        """Assemble predictor input from current env state.
 
-        Components match the YAML obs ordering:
+        Base components (115D):
           base_ang_vel(3), projected_gravity(3), command_lin_vel(2),
           command_ang_vel(1), command_stand(1), command_waist_dofs(3),
           command_base_height(1), ref_upper_dof_pos(14), dof_pos(29),
           dof_vel(29), actions(29) = 115
+
+        Enhanced body-side context (+8D = 123D total, when enabled):
+          sin(gait_phase)(1), cos(gait_phase)(1), foot_contacts(2),
+          base_lin_vel(3), payload_mass(1)
         """
-        return torch.cat([
+        parts = [
             self.base_ang_vel,                              # 3
             self.projected_gravity,                         # 3
             self.commands[:, 0:2],                          # 2  lin vel
@@ -463,7 +473,18 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
             self.simulator.dof_pos - self.default_dof_pos,  # 29
             self.simulator.dof_vel,                         # 29
             self.actions,                                   # 29
-        ], dim=-1)                                          # = 115
+        ]                                                   # = 115
+
+        if getattr(self.config, "use_enhanced_predictor_obs", False):
+            parts.extend([
+                torch.sin(_TWO_PI * self.phase_time).unsqueeze(1),  # 1
+                torch.cos(_TWO_PI * self.phase_time).unsqueeze(1),  # 1
+                self.last_contacts_filt.float(),                    # 2
+                self.base_lin_vel,                                  # 3
+                self._payload_mass.unsqueeze(1),                    # 1
+            ])                                                      # +8 = 123
+
+        return torch.cat(parts, dim=-1)
 
     # ------------------------------------------------------------------
     # CVAE encoder inference

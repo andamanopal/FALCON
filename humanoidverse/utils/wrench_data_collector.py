@@ -55,6 +55,7 @@ class WrenchDataCollector:
         horizon (int): Prediction horizon H (default 5).
         capacity (int): Max number of aligned training pairs to store.
         device (str | torch.device): Device for all tensors.
+        obs_dim (int): Observation dimension (115 for base, 123 for enhanced).
     """
 
     def __init__(
@@ -63,17 +64,19 @@ class WrenchDataCollector:
         horizon: int = DEFAULT_HORIZON,
         capacity: int = CAPACITY,
         device: str | torch.device = "cuda",
+        obs_dim: int = OBS_DIM,
     ):
         self.num_envs = num_envs
         self.horizon = horizon
         self.capacity = capacity
         self.device = torch.device(device)
+        self._obs_dim = obs_dim
         self._queue_len = horizon + 1  # Need H+1 steps to form one pair
 
         # Per-env circular FIFO queues
         # Shape: (num_envs, queue_len, dim)
         self._q_obs = torch.zeros(
-            num_envs, self._queue_len, OBS_DIM,
+            num_envs, self._queue_len, obs_dim,
             dtype=torch.float32, device=self.device,
         )
         self._q_plan = torch.zeros(
@@ -94,7 +97,7 @@ class WrenchDataCollector:
 
         # Output ring buffer for aligned training pairs
         self._out_obs = torch.zeros(
-            capacity, OBS_DIM, dtype=torch.float32, device=self.device,
+            capacity, obs_dim, dtype=torch.float32, device=self.device,
         )
         self._out_plan = torch.zeros(
             capacity, PLAN_DIM, dtype=torch.float32, device=self.device,
@@ -284,7 +287,7 @@ class WrenchDataCollector:
                 "capacity": self.capacity,
                 "size": self._out_size,
                 "horizon": self.horizon,
-                "obs_dim": OBS_DIM,
+                "obs_dim": self._obs_dim,
                 "plan_dim": PLAN_DIM,
                 "wrench_dim": WRENCH_DIM,
                 "target_dim": self.horizon * WRENCH_DIM,
@@ -311,6 +314,7 @@ class WrenchDataCollector:
             horizon=meta["horizon"],
             capacity=meta["capacity"],
             device=device,
+            obs_dim=meta.get("obs_dim", OBS_DIM),
         )
         n = meta["size"]
 

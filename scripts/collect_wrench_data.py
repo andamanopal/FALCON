@@ -234,8 +234,9 @@ def main(config: OmegaConf):
 
     if env._wrench_collector is not None:
         actual_size = len(env._wrench_collector)
+        actual_obs_dim = env._wrench_collector._obs_dim
         logger.info(
-            f"  obs    shape: ({actual_size}, {OBS_DIM})\n"
+            f"  obs    shape: ({actual_size}, {actual_obs_dim})\n"
             f"  plan   shape: ({actual_size}, {PLAN_DIM})\n"
             f"  wrench shape: ({actual_size}, {WRENCH_DIM})"
         )

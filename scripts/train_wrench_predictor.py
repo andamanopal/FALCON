@@ -116,19 +116,20 @@ def load_dataset(data_path: str, device: torch.device):
     log.info(f"Loading dataset from {data_path}")
     raw = torch.load(data_path, map_location="cpu", weights_only=True)
 
-    obs = raw["obs"].float()              # (N, 115)
+    obs = raw["obs"].float()              # (N, obs_dim)
     plan = raw["plan"].float()            # (N, 70)
     wrench_target = raw["wrench"].float() # (N, 30) — H future wrenches
 
     n_samples = obs.shape[0]
+    actual_obs_dim = obs.shape[1]
     log.info(f"  Loaded {n_samples:,} aligned training pairs")
-    log.info(f"  obs shape:    {tuple(obs.shape)}")
+    log.info(f"  obs shape:    {tuple(obs.shape)} (obs_dim={actual_obs_dim})")
     log.info(f"  plan shape:   {tuple(plan.shape)}")
     log.info(f"  wrench shape: {tuple(wrench_target.shape)}")
 
-    # Validate dimensions
-    assert obs.shape[1] == OBS_DIM, (
-        f"Expected obs dim {OBS_DIM}, got {obs.shape[1]}"
+    # Validate dimensions — accept both base (115) and enhanced (123) obs
+    assert actual_obs_dim in (115, 123), (
+        f"Expected obs dim 115 (base) or 123 (enhanced), got {actual_obs_dim}"
     )
     assert plan.shape[1] == PLAN_DIM, (
         f"Expected plan dim {PLAN_DIM}, got {plan.shape[1]}"
@@ -292,7 +293,8 @@ def print_per_component_table(metrics: dict):
 # Training loop
 # ---------------------------------------------------------------------------
 
-def _init_wandb(args, n_train: int, n_val: int, num_params: int):
+def _init_wandb(args, n_train: int, n_val: int, num_params: int,
+                obs_dim: int = OBS_DIM):
     """Initialize WandB run if available and not disabled."""
     use_wandb = _HAS_WANDB and not args.no_wandb
     if not use_wandb:
@@ -316,7 +318,7 @@ def _init_wandb(args, n_train: int, n_val: int, num_params: int):
             "n_train": n_train,
             "n_val": n_val,
             "num_params": num_params,
-            "obs_dim": OBS_DIM,
+            "obs_dim": obs_dim,
             "plan_dim": PLAN_DIM,
             "output_dim": OUTPUT_DIM,
             "horizon": HORIZON,
@@ -444,10 +446,14 @@ def evaluate(args):
     )
 
     WrenchPredictor = _load_predictor_class()
-    # Auto-detect whether checkpoint used plan derivatives
+    # Auto-detect architecture from checkpoint
     state_dict = ckpt["model_state_dict"]
     use_deriv = "plan_vel_mean" in state_dict
-    model = WrenchPredictor(use_plan_derivatives=use_deriv).to(device)
+    ckpt_obs_dim = state_dict["obs_mean"].shape[0] if "obs_mean" in state_dict else OBS_DIM
+    model = WrenchPredictor(
+        use_plan_derivatives=use_deriv,
+        obs_dim=ckpt_obs_dim,
+    ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
     log.info(f"Model parameters: {model.num_parameters():,}")
@@ -491,6 +497,7 @@ def train(args):
     # ------------------------------------------------------------------
     obs_all, plan_all, wrench_all = load_dataset(args.data_path, device)
     n_total = obs_all.shape[0]
+    actual_obs_dim = obs_all.shape[1]
 
     # ------------------------------------------------------------------
     # 80/20 train/val split (deterministic via generator seed)
@@ -526,7 +533,10 @@ def train(args):
     # Model
     # ------------------------------------------------------------------
     WrenchPredictor = _load_predictor_class()
-    model = WrenchPredictor(use_plan_derivatives=use_deriv).to(device)
+    model = WrenchPredictor(
+        use_plan_derivatives=use_deriv,
+        obs_dim=actual_obs_dim,
+    ).to(device)
     deriv_kwargs = {}
     if use_deriv:
         deriv_kwargs = {
@@ -551,7 +561,10 @@ def train(args):
     # ------------------------------------------------------------------
     # WandB initialization
     # ------------------------------------------------------------------
-    use_wandb = _init_wandb(args, n_train, n_val, model.num_parameters())
+    use_wandb = _init_wandb(
+        args, n_train, n_val, model.num_parameters(),
+        obs_dim=actual_obs_dim,
+    )
 
     # ------------------------------------------------------------------
     # Optimizer and scheduler
@@ -726,6 +739,7 @@ def train(args):
                 "patience":    args.patience,
                 "n_train":     n_train,
                 "n_val":       n_val,
+                "obs_dim":     actual_obs_dim,
                 "use_plan_derivatives": use_deriv,
             },
             "metrics": {

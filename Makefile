@@ -77,6 +77,7 @@ OBS_CURRENT_WR    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_cu
 OBS_DIRECT_PLAN   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
 OBS_DIRECT_CRIT   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_critic
 OBS_ANTICIPOSE    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
+OBS_ANTICIPOSE_CW = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose_current_wrench
 OBS_CVAE          = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_cvae
 
 # Eval command
@@ -93,10 +94,11 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 .DEFAULT_GOAL := help
 
 .PHONY: help
-.PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b6
+.PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b5c train-b6
 .PHONY: train-pipeline train-pipeline-tmux pipeline-status pipeline-resume
 .PHONY: collect-wrench train-predictor eval-predictor train-cvae
-.PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b6
+.PHONY: collect-wrench-v2 train-predictor-v2 train-b5c-v2
+.PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b5c-v2 eval-b6
 .PHONY: smoke-test retrain-b5
 .PHONY: sync-wandb results
 
@@ -150,6 +152,16 @@ train-b5:
 	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE) \
 	  project_name=$(PROJECT) \
 	  experiment_name=B5_anticipose_seed$(SEED) \
+	  env.config.anticipose_mode=anticipose \
+	  ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## train-b5c: Train B5c anticipose + current wrench anchor (requires predictor checkpoint)
+train-b5c:
+	@test -f "$(PRED_CKPT)" || (echo "ERROR: Predictor not found at $(PRED_CKPT). Run: make collect-wrench && make train-predictor" && exit 1)
+	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE_CW) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B5c_anticipose_cw_seed$(SEED) \
 	  env.config.anticipose_mode=anticipose \
 	  ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
@@ -224,6 +236,55 @@ train-cvae:
 	  --wandb_entity $(WANDB_ENTITY) \
 	  --wandb_project $(WANDB_PROJECT) \
 	  --wandb_run_name cvae_seed$(SEED)_ep$(PRED_EPOCHS)
+
+# ============================================================================
+# ENHANCED PREDICTOR (v2: body-side context, 123D obs)
+# ============================================================================
+
+## collect-wrench-v2: Collect wrench data with body-side context (123D obs)
+collect-wrench-v2:
+	@B1_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B1_reactive_seed$(SEED)* | head -1) && \
+	echo "Using B1 checkpoint: $${B1_DIR}/model_$(NUM_ITERS).pt" && \
+	python scripts/collect_wrench_data.py \
+	  +exp=anticipose $(COMMON) $(OBS_BASE) \
+	  project_name=$(PROJECT) \
+	  experiment_name=collect_wrench_v2_seed$(SEED) \
+	  env.config.anticipose_mode=reactive \
+	  env.config.collect_wrench_data=true \
+	  env.config.use_enhanced_predictor_obs=true \
+	  env.config.collect_buffer_size=$(COLLECT_SAMPLES) \
+	  checkpoint=$${B1_DIR}/model_$(NUM_ITERS).pt \
+	  +output_path=$(LOG_DIR)/$(PROJECT)/wrench_data_v2_seed$(SEED).pt \
+	  +num_samples=$(COLLECT_SAMPLES) \
+	  headless=true
+
+## train-predictor-v2: Train wrench predictor on enhanced 123D obs data
+train-predictor-v2:
+	@test -f "$(LOG_DIR)/$(PROJECT)/wrench_data_v2_seed$(SEED).pt" || \
+	  (echo "ERROR: Enhanced wrench data not found. Run: make collect-wrench-v2" && exit 1)
+	python scripts/train_wrench_predictor.py \
+	  --data_path $(LOG_DIR)/$(PROJECT)/wrench_data_v2_seed$(SEED).pt \
+	  --save_path $(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt \
+	  --epochs $(PRED_EPOCHS) \
+	  --batch_size $(PRED_BATCH) \
+	  --patience $(PRED_PATIENCE) \
+	  --device cuda \
+	  --wandb_entity $(WANDB_ENTITY) \
+	  --wandb_project $(WANDB_PROJECT) \
+	  --wandb_run_name wrench_pred_v2_seed$(SEED)_ep$(PRED_EPOCHS) \
+	  $(if $(PRED_PLAN_DERIV),--use_plan_derivatives,)
+
+## train-b5c-v2: Train B5c with improved predictor (enhanced 123D obs)
+train-b5c-v2:
+	@PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	test -f "$$PRED_V2" || (echo "ERROR: v2 predictor not found at $$PRED_V2. Run: make train-predictor-v2" && exit 1) && \
+	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE_CW) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B5c_v2_anticipose_cw_seed$(SEED) \
+	  env.config.anticipose_mode=anticipose \
+	  env.config.use_enhanced_predictor_obs=true \
+	  ++env.config.wrench_predictor_ckpt=$$PRED_V2 \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
 
 # ============================================================================
 # B5 QUICK ITERATION (skip B1 training, re-use existing wrench data if present)
@@ -400,8 +461,8 @@ train-pipeline-tmux:
 # EVALUATION TARGETS
 # ============================================================================
 
-## eval-all: Evaluate all 7 baselines on train + held-out tasks
-eval-all: eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b6
+## eval-all: Evaluate all baselines on train + held-out tasks (B5c included if trained)
+eval-all: eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b6
 	@echo ""
 	@echo "========================================"
 	@echo "  ALL EVALUATIONS COMPLETE (seed=$(SEED))"
@@ -522,6 +583,49 @@ eval-b5:
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
 	  --wrench_predictor_ckpt $(PRED_CKPT) \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
+
+## eval-b5c: Evaluate B5c anticipose + current wrench anchor
+eval-b5c:
+	@B5C_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5c_anticipose_cw_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B5C_DIR" ]; then echo "SKIP: B5c not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5C_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_anticipose_cw_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --wrench_predictor_ckpt $(PRED_CKPT) \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5C_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_anticipose_cw_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --wrench_predictor_ckpt $(PRED_CKPT) \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
+
+## eval-b5c-v2: Evaluate B5c with improved predictor (v2, enhanced 123D obs)
+eval-b5c-v2:
+	@B5C_V2_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5c_v2_anticipose_cw_seed$(SEED)* 2>/dev/null | head -1) && \
+	PRED_V2=$(LOG_DIR)/$(PROJECT)/wrench_predictor_v2_seed$(SEED).pt && \
+	if [ -z "$$B5C_V2_DIR" ]; then echo "SKIP: B5c-v2 not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5C_V2_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_v2_anticipose_cw_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --wrench_predictor_ckpt $$PRED_V2 \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5C_V2_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5c_v2_anticipose_cw_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --wrench_predictor_ckpt $$PRED_V2 \
 	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 ## eval-b6: Evaluate B6 CVAE latent

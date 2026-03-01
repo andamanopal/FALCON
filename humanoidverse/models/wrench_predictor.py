@@ -51,6 +51,18 @@ PLAN_VEL_DIM = (HORIZON - 1) * ARM_JOINTS   # 4 * 14 = 56
 PLAN_ACC_DIM = (HORIZON - 2) * ARM_JOINTS   # 3 * 14 = 42
 ENHANCED_INPUT_DIM = INPUT_DIM + PLAN_VEL_DIM + PLAN_ACC_DIM  # 283
 
+# Enhanced obs with body-side context (gait phase, foot contacts, base_lin_vel, payload)
+ENHANCED_OBS_DIM = 123       # 115 + 8 body-side signals
+ENHANCED_INPUT_DIM_V2 = ENHANCED_OBS_DIM + PLAN_DIM  # 193
+
+# Known input dimensions for auto-detection from checkpoints
+_KNOWN_INPUT_DIMS = {
+    185: {"obs_dim": OBS_DIM, "use_derivatives": False},        # base
+    193: {"obs_dim": ENHANCED_OBS_DIM, "use_derivatives": False},  # body-side context
+    283: {"obs_dim": OBS_DIM, "use_derivatives": True},          # base + derivatives
+    291: {"obs_dim": ENHANCED_OBS_DIM, "use_derivatives": True},   # body-side + derivatives
+}
+
 
 class WrenchPredictor(nn.Module):
     """Frozen MLP wrench predictor.
@@ -72,14 +84,23 @@ class WrenchPredictor(nn.Module):
     """
 
     def __init__(self, input_dim=None, output_dim=OUTPUT_DIM, plan_dim=PLAN_DIM,
-                 use_plan_derivatives=False):
+                 use_plan_derivatives=False, obs_dim=None):
         super().__init__()
 
         self._use_plan_derivatives = use_plan_derivatives
 
-        # Resolve input_dim: enhanced (283) when using derivatives, else 185
+        # Resolve obs_dim: default to OBS_DIM (115) if not specified
+        if obs_dim is None:
+            obs_dim = OBS_DIM
+        self._obs_dim = obs_dim
+
+        # Resolve input_dim from obs_dim + plan + optional derivatives
         if input_dim is None:
-            input_dim = ENHANCED_INPUT_DIM if use_plan_derivatives else INPUT_DIM
+            base_input = obs_dim + plan_dim
+            if use_plan_derivatives:
+                input_dim = base_input + PLAN_VEL_DIM + PLAN_ACC_DIM
+            else:
+                input_dim = base_input
         self._input_dim = input_dim
         self._output_dim = output_dim
 
@@ -108,8 +129,8 @@ class WrenchPredictor(nn.Module):
         # moved with .to(device), but not updated by optimisers).
         # Defaults: identity transform (mean=0, std=1).
         # ------------------------------------------------------------------
-        self.register_buffer("obs_mean",    torch.zeros(OBS_DIM))
-        self.register_buffer("obs_std",     torch.ones(OBS_DIM))
+        self.register_buffer("obs_mean",    torch.zeros(obs_dim))
+        self.register_buffer("obs_std",     torch.ones(obs_dim))
         self.register_buffer("plan_mean",   torch.zeros(plan_dim))
         self.register_buffer("plan_std",    torch.ones(plan_dim))
         self.register_buffer("wrench_mean", torch.zeros(output_dim))
@@ -264,7 +285,26 @@ class WrenchPredictor(nn.Module):
             )
 
         use_derivatives = "plan_vel_mean" in state_dict
-        model = cls(use_plan_derivatives=use_derivatives).to(device)
+
+        # Auto-detect obs_dim: prefer obs_mean buffer (most reliable),
+        # fall back to first-layer input size for legacy checkpoints.
+        if "obs_mean" in state_dict:
+            obs_dim = state_dict["obs_mean"].shape[0]
+        else:
+            first_layer_in = state_dict["net.0.weight"].shape[1]
+            detected = _KNOWN_INPUT_DIMS.get(first_layer_in)
+            if detected is not None:
+                obs_dim = detected["obs_dim"]
+            else:
+                deriv_extra = (
+                    PLAN_VEL_DIM + PLAN_ACC_DIM if use_derivatives else 0
+                )
+                obs_dim = first_layer_in - PLAN_DIM - deriv_extra
+
+        model = cls(
+            use_plan_derivatives=use_derivatives,
+            obs_dim=obs_dim,
+        ).to(device)
         model.load_state_dict(state_dict, strict=True)
         model._freeze()
         return model
