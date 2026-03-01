@@ -428,11 +428,11 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
         target = self._current_wrench
 
         residuals = pred - target
-        rmse_overall = (residuals ** 2).mean().sqrt().item()
+        rmse_overall = (residuals ** 2).mean().sqrt()
 
         # Force (first 3 dims) vs torque (last 3 dims)
-        rmse_force = (residuals[:, :3] ** 2).mean().sqrt().item()
-        rmse_torque = (residuals[:, 3:] ** 2).mean().sqrt().item()
+        rmse_force = (residuals[:, :3] ** 2).mean().sqrt()
+        rmse_torque = (residuals[:, 3:] ** 2).mean().sqrt()
 
         if hasattr(self, "log_dict"):
             self.log_dict["Env/pred_wrench_rmse_overall"] = rmse_overall
