@@ -92,3 +92,12 @@ env:
     # Maximum payload mass in kg (randomized per env at reset).
     # Set to 0.0 to disable payload simulation.
     max_payload_mass: 5.0
+
+    # ------------------------------------------------------------------
+    # Enhanced predictor obs (v2 body-side context)
+    # ------------------------------------------------------------------
+
+    # When true, _build_predictor_obs() appends 8 body-side signals
+    # (gait phase sin/cos, foot contacts, base_lin_vel, payload_mass)
+    # producing 123D obs instead of 115D.  Used for v2 predictor pipeline.
+    use_enhanced_predictor_obs: false
