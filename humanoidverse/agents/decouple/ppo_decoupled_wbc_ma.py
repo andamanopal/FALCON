@@ -137,14 +137,26 @@ class PPOMultiActorCritic(PPO):
         for critic in self.critics.values():
             critic.train()
 
-    def load(self, ckpt_path):
+    def load(self, ckpt_path, partial=False):
         if ckpt_path is not None:
             logger.info(f"Loading checkpoint from {ckpt_path}")
             loaded_dict = torch.load(ckpt_path, map_location=self.device)
             for key in self.keys:
-                self.actors[key].load_state_dict(loaded_dict["actor_model_state_dict"][key])
-                self.critics[key].load_state_dict(loaded_dict["critic_model_state_dict"][key])
-            if self.load_optimizer:
+                if partial:
+                    self._load_state_dict_partial(
+                        self.actors[key],
+                        loaded_dict["actor_model_state_dict"][key],
+                        label=f"actor[{key}]",
+                    )
+                    self._load_state_dict_partial(
+                        self.critics[key],
+                        loaded_dict["critic_model_state_dict"][key],
+                        label=f"critic[{key}]",
+                    )
+                else:
+                    self.actors[key].load_state_dict(loaded_dict["actor_model_state_dict"][key])
+                    self.critics[key].load_state_dict(loaded_dict["critic_model_state_dict"][key])
+            if self.load_optimizer and not partial:
                 for key in self.keys:
                     self.actor_optimizers[key].load_state_dict(loaded_dict["actor_optimizer_state_dict"][key])
                     self.critic_optimizers[key].load_state_dict(loaded_dict["critic_optimizer_state_dict"][key])
@@ -154,8 +166,61 @@ class PPOMultiActorCritic(PPO):
                 logger.info(f"Optimizer loaded from checkpoint")
                 logger.info(f"Actor Learning rate: {self.actor_learning_rates}")
                 logger.info(f"Critic Learning rate: {self.critic_learning_rates}")
-            self.current_learning_iteration = loaded_dict["iter"]
-            return loaded_dict["infos"]
+            if partial:
+                logger.info(
+                    "[Partial load] Iteration counter reset to 0, "
+                    "optimizer state NOT loaded"
+                )
+            else:
+                self.current_learning_iteration = loaded_dict["iter"]
+            return loaded_dict.get("infos")
+
+    @staticmethod
+    def _load_state_dict_partial(model, src_state_dict, label=""):
+        """Load weights with dimension-mismatch tolerance.
+
+        For layers where source and target shapes differ (e.g. first linear
+        layer when actor obs grows from B1 to B5), copy the overlapping
+        slice and leave new dimensions at their random init.
+        """
+        tgt_sd = model.state_dict()
+        loaded, partial_loaded, skipped = 0, 0, 0
+        for name, tgt_param in tgt_sd.items():
+            if name not in src_state_dict:
+                skipped += 1
+                continue
+            src_param = src_state_dict[name]
+            if src_param.shape == tgt_param.shape:
+                tgt_param.copy_(src_param)
+                loaded += 1
+            elif src_param.dim() == 2 and tgt_param.dim() == 2:
+                min_out = min(src_param.shape[0], tgt_param.shape[0])
+                min_in = min(src_param.shape[1], tgt_param.shape[1])
+                tgt_param[:min_out, :min_in].copy_(
+                    src_param[:min_out, :min_in]
+                )
+                partial_loaded += 1
+                logger.info(
+                    f"[Partial load] {label}.{name}: "
+                    f"{list(src_param.shape)} -> {list(tgt_param.shape)} "
+                    f"(copied [{min_out}, {min_in}] slice)"
+                )
+            elif src_param.dim() == 1 and tgt_param.dim() == 1:
+                min_len = min(src_param.shape[0], tgt_param.shape[0])
+                tgt_param[:min_len].copy_(src_param[:min_len])
+                partial_loaded += 1
+            else:
+                skipped += 1
+                logger.warning(
+                    f"[Partial load] {label}.{name}: "
+                    f"shape mismatch {list(src_param.shape)} vs "
+                    f"{list(tgt_param.shape)}, skipped"
+                )
+        model.load_state_dict(tgt_sd)
+        logger.info(
+            f"[Partial load] {label}: {loaded} exact, "
+            f"{partial_loaded} partial, {skipped} skipped"
+        )
 
     def set_learning_rates(self, actor_learning_rates, critic_learning_rates):
         self.actor_learning_rates = actor_learning_rates

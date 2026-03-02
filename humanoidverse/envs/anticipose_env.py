@@ -439,6 +439,14 @@ class AnticiPoseEnv(LeggedRobotDecoupledLocomotionStanceHeightWBCForce):
                 obs_step, self._arm_plan_buf,
             )
 
+        # Noise injection for robustness to prediction errors (training only).
+        # Makes the policy robust to distribution shift in predicted wrenches.
+        noise_std = getattr(self.config, "pred_wrench_noise_std", 0.0)
+        if noise_std > 0.0 and not self.is_evaluating:
+            self._predicted_wrench_buf += (
+                torch.randn_like(self._predicted_wrench_buf) * noise_std
+            )
+
     def _monitor_prediction_shift(self):
         """Log wrench prediction RMSE to detect distribution shift.
 

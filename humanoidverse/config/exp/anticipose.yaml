@@ -101,3 +101,26 @@ env:
     # (gait phase sin/cos, foot contacts, base_lin_vel, payload_mass)
     # producing 123D obs instead of 115D.  Used for v2 predictor pipeline.
     use_enhanced_predictor_obs: false
+
+    # ------------------------------------------------------------------
+    # B5 rescue: fine-tune from B1 + noise injection
+    # ------------------------------------------------------------------
+
+    # Gaussian noise std added to predicted wrenches during training.
+    # Makes the policy robust to prediction errors from distribution shift.
+    # Set 0.0 to disable. Recommended: 0.1 for fine-tune runs.
+    pred_wrench_noise_std: 0.0
+
+    # ------------------------------------------------------------------
+    # DAgger co-training (Stage 2 escalation, if Stage 1 fails)
+    # ------------------------------------------------------------------
+    dagger_enabled: false
+    dagger_original_data_path: null
+    dagger_interval: 100
+    dagger_fine_tune_lr: 1.0e-4
+    dagger_fine_tune_epochs: 5
+    dagger_batch_size: 4096
+    dagger_alpha_start: 0.5
+    dagger_alpha_end: 0.2
+    dagger_alpha_anneal_iters: 2000
+    dagger_val_tolerance: 0.1

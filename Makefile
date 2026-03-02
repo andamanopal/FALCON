@@ -104,8 +104,9 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 .PHONY: collect-wrench train-predictor eval-predictor train-cvae
 .PHONY: collect-wrench-v2 train-predictor-v2 eval-predictor-v2 train-b5c-v2
 .PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b5c-v2 eval-b5c-delta eval-b5c-h1 eval-b5c-h1-delta eval-b6
-.PHONY: smoke-test retrain-b5
+.PHONY: smoke-test retrain-b5 train-b5-ft eval-b5-ft
 .PHONY: sync-wandb results
+.PHONY: eval-per-task collect-torque plot-figures
 
 # ============================================================================
 # INDIVIDUAL TRAINING TARGETS
@@ -216,6 +217,47 @@ train-b6:
 	  env.config.anticipose_mode=cvae \
 	  ++env.config.cvae_ckpt=$(CVAE_CKPT) \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+# ============================================================================
+# B5-FT: FINE-TUNE FROM B1 (A-RMA Phase 3 analog)
+# ============================================================================
+
+## train-b5-ft: Fine-tune B5 from B1 checkpoint with noise injection (Stage 1 rescue)
+train-b5-ft:
+	@test -f "$(PRED_CKPT)" || (echo "ERROR: Predictor not found at $(PRED_CKPT). Run: make collect-wrench && make train-predictor" && exit 1)
+	@B1_CKPT=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B1_reactive_seed$(SEED)* 2>/dev/null | head -1)/model_$(NUM_ITERS).pt && \
+	test -f "$$B1_CKPT" || (echo "ERROR: B1 checkpoint not found: $$B1_CKPT" && exit 1) && \
+	echo "Fine-tuning B5 from B1: $$B1_CKPT" && \
+	$(TRAIN_CMD) $(COMMON) $(OBS_ANTICIPOSE) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B5ft_finetune_seed$(SEED) \
+	  env.config.anticipose_mode=anticipose \
+	  ++env.config.wrench_predictor_ckpt=$(PRED_CKPT) \
+	  ++env.config.pred_wrench_noise_std=0.1 \
+	  checkpoint=$$B1_CKPT \
+	  ++load_partial=true \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## eval-b5-ft: Evaluate B5-ft fine-tuned model
+eval-b5-ft:
+	@B5FT_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5ft_finetune_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B5FT_DIR" ]; then echo "SKIP: B5-ft not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5FT_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5ft_finetune_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --wrench_predictor_ckpt $(PRED_CKPT) \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B5FT_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B5ft_finetune_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --wrench_predictor_ckpt $(PRED_CKPT) \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
 
 # ============================================================================
 # DATA COLLECTION & PREDICTOR
@@ -803,6 +845,52 @@ results:
 	  fi ; \
 	done
 	@echo ""
+
+# ============================================================================
+# PER-TASK EVALUATION, TORQUE COLLECTION & PAPER FIGURES
+# ============================================================================
+
+TASKS = frontal_reach_lift,lateral_shelf_pick,forward_push,lateral_slam_down,cross_body_reach
+
+## eval-per-task: Run per-task evaluation for all baselines x tasks x seeds
+eval-per-task:
+	python scripts/eval_per_task.py \
+	  --baselines B1,B2,B3,B4a,B4b,B5,B6 \
+	  --tasks $(TASKS) \
+	  --seeds $(SEED) \
+	  --num_episodes $(NUM_EPISODES) \
+	  --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --num_iters $(NUM_ITERS) \
+	  --log_dir $(LOG_DIR)/$(PROJECT) \
+	  --output_dir $(OUTPUT_DIR)
+
+## collect-torque: Collect torque time-series for B1 and B5 (APA analysis)
+collect-torque:
+	@B1_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B1_reactive_seed$(SEED)* 2>/dev/null | head -1) && \
+	B5_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B5_anticipose_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B1_DIR" ]; then echo "ERROR: B1 not found for seed $(SEED)"; exit 1; fi && \
+	if [ -z "$$B5_DIR" ]; then echo "ERROR: B5 not found for seed $(SEED)"; exit 1; fi && \
+	mkdir -p torque_data && \
+	echo "=== Collecting torques: B1 lateral_shelf_pick seed$(SEED) ===" && \
+	python scripts/collect_torque_timeseries.py \
+	  --checkpoint $${B1_DIR}/model_$(NUM_ITERS).pt \
+	  --task lateral_shelf_pick \
+	  --num_episodes 50 --num_envs $(EVAL_NUM_ENVS) \
+	  --output torque_data/B1_lateral_shelf_pick_s$(SEED).pt && \
+	echo "=== Collecting torques: B5 lateral_shelf_pick seed$(SEED) ===" && \
+	python scripts/collect_torque_timeseries.py \
+	  --checkpoint $${B5_DIR}/model_$(NUM_ITERS).pt \
+	  --task lateral_shelf_pick \
+	  --wrench_predictor_ckpt $(PRED_CKPT) \
+	  --num_episodes 50 --num_envs $(EVAL_NUM_ENVS) \
+	  --output torque_data/B5_lateral_shelf_pick_s$(SEED).pt
+
+## plot-figures: Generate all paper figures (CPU-only, run locally)
+plot-figures:
+	python scripts/plot_main_results_box.py --output_dir ../paper/figures
+	python scripts/plot_per_task_bars.py --output_dir ../paper/figures
+	python scripts/plot_torque_timeseries.py --data_dir torque_data --output_dir ../paper/figures
 
 ## help: Show available targets and usage
 help:

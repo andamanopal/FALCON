@@ -138,7 +138,13 @@ class PPO(BaseAlgo):
         self.actor.train()
         self.critic.train()
 
-    def load(self, ckpt_path):
+    def load(self, ckpt_path, partial=False):
+        if partial:
+            raise NotImplementedError(
+                "Partial loading is only supported by PPOMultiActorCritic. "
+                "Use the decoupled PPO variant for fine-tuning with "
+                "dimension mismatches."
+            )
         if ckpt_path is not None:
             logger.info(f"Loading checkpoint from {ckpt_path}")
             loaded_dict = torch.load(ckpt_path, map_location=self.device)

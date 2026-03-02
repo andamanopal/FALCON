@@ -106,7 +106,8 @@ def main(config: OmegaConf):
     algo.setup()
 
     if config.checkpoint is not None:
-        algo.load(config.checkpoint)
+        load_partial = config.get("load_partial", False)
+        algo.load(config.checkpoint, partial=load_partial)
 
     # handle saving config
     algo.learn()
