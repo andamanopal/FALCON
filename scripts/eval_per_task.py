@@ -195,9 +195,9 @@ def main():
     print(f"{'='*70}\n")
 
     # Print results table from available JSONs
-    print(f"{'Baseline':<12} {'Task':<24} {'Seed':<6} {'Mean Reward':>12} "
-          f"{'Mean EpLen':>12} {'Survival%':>10}")
-    print("-" * 78)
+    print(f"{'Baseline':<12} {'Task':<24} {'Seed':<6} {'Reward':>10} "
+          f"{'EpLen':>8} {'Surv%':>7} {'Ori°':>7} {'VelErr':>8}")
+    print("-" * 84)
 
     for seed in seeds:
         for baseline in baselines:
@@ -209,11 +209,17 @@ def main():
                 if result_file.exists():
                     with open(result_file) as f:
                         d = json.load(f)
+                    ori = d.get('mean_orientation_rms_deg', -1)
+                    vel = d.get('mean_vel_tracking_err_rms', -1)
+                    surv = d['survival_rate'] * 100
+
                     print(
                         f"{baseline:<12} {task:<24} {seed:<6} "
-                        f"{d['mean_reward']:>12.2f} "
-                        f"{d['mean_episode_length']:>12.1f} "
-                        f"{d['survival_rate']*100:>9.1f}%"
+                        f"{d['mean_reward']:>10.2f} "
+                        f"{d['mean_episode_length']:>8.1f} "
+                        f"{surv:>6.1f}% "
+                        f"{ori:>7.2f} "
+                        f"{vel:>8.3f}"
                     )
 
 

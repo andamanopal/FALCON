@@ -131,11 +131,24 @@ def main():
         episode_rewards = []
         episode_lengths = []
         episode_survived = []
+        episode_orientation_rms = []
+        episode_vel_err_rms = []
+        episode_angvel_err_rms = []
+        episode_peak_force = []
+        episode_peak_torque = []
 
         total_episodes_done = 0
         obs_dict = env.reset_all()
         cumulative_reward = torch.zeros(num_envs, device=device)
         episode_len = torch.zeros(num_envs, device=device)
+
+        # Physical metric accumulators (per-env, GPU)
+        sum_orientation_sq = torch.zeros(num_envs, device=device)
+        sum_vel_err_sq = torch.zeros(num_envs, device=device)
+        sum_angvel_err_sq = torch.zeros(num_envs, device=device)
+        peak_wrench_force = torch.zeros(num_envs, device=device)
+        peak_wrench_torque = torch.zeros(num_envs, device=device)
+        has_wrench = hasattr(env, '_current_wrench')
 
         while total_episodes_done < args.num_episodes:
             with torch.no_grad():
@@ -151,16 +164,48 @@ def main():
             cumulative_reward += sum(rewards.values())
             episode_len += 1
 
+            # Physical metrics accumulation
+            roll = env.rpy[:, 0]
+            pitch = env.rpy[:, 1]
+            sum_orientation_sq += roll ** 2 + pitch ** 2
+
+            cmd_vx = env.commands[:, 0]
+            cmd_vy = env.commands[:, 1]
+            sum_vel_err_sq += (cmd_vx - env.base_lin_vel[:, 0]) ** 2 + \
+                              (cmd_vy - env.base_lin_vel[:, 1]) ** 2
+
+            cmd_wz = env.commands[:, 2]
+            sum_angvel_err_sq += (cmd_wz - env.base_ang_vel[:, 2]) ** 2
+
+            if has_wrench:
+                wrench = env._current_wrench
+                force_norm = torch.norm(wrench[:, :3], dim=1)
+                torque_norm = torch.norm(wrench[:, 3:], dim=1)
+                peak_wrench_force = torch.max(peak_wrench_force, force_norm)
+                peak_wrench_torque = torch.max(peak_wrench_torque, torque_norm)
+
             done_indices = dones.nonzero(as_tuple=False).squeeze(-1)
             for idx in done_indices:
                 i = idx.item()
                 ep_reward = cumulative_reward[i].item()
                 ep_len = episode_len[i].item()
-                survived = ep_len >= (max_steps - 1)
+                survived = bool(extras["time_outs"][i].item())
 
                 episode_rewards.append(ep_reward)
                 episode_lengths.append(ep_len)
                 episode_survived.append(survived)
+
+                steps = max(ep_len, 1)
+                ori_rms_deg = math.degrees(math.sqrt(sum_orientation_sq[i].item() / steps))
+                vel_err = math.sqrt(sum_vel_err_sq[i].item() / steps)
+                angvel_err = math.sqrt(sum_angvel_err_sq[i].item() / steps)
+
+                episode_orientation_rms.append(ori_rms_deg)
+                episode_vel_err_rms.append(vel_err)
+                episode_angvel_err_rms.append(angvel_err)
+                episode_peak_force.append(peak_wrench_force[i].item() if has_wrench else 0.0)
+                episode_peak_torque.append(peak_wrench_torque[i].item() if has_wrench else 0.0)
+
                 total_episodes_done += 1
 
                 if total_episodes_done % 10 == 0:
@@ -168,6 +213,11 @@ def main():
 
                 cumulative_reward[i] = 0.0
                 episode_len[i] = 0.0
+                sum_orientation_sq[i] = 0.0
+                sum_vel_err_sq[i] = 0.0
+                sum_angvel_err_sq[i] = 0.0
+                peak_wrench_force[i] = 0.0
+                peak_wrench_torque[i] = 0.0
 
                 if total_episodes_done >= args.num_episodes:
                     break
@@ -176,6 +226,12 @@ def main():
         rewards_t = torch.tensor(episode_rewards)
         lengths_t = torch.tensor(episode_lengths)
         survived_t = torch.tensor(episode_survived, dtype=torch.float32)
+
+        ori_t = torch.tensor(episode_orientation_rms)
+        vel_t = torch.tensor(episode_vel_err_rms)
+        angvel_t = torch.tensor(episode_angvel_err_rms)
+        force_t = torch.tensor(episode_peak_force)
+        torque_t = torch.tensor(episode_peak_torque)
 
         results = {
             "eval_name": eval_label,
@@ -191,6 +247,16 @@ def main():
             "survival_rate": survived_t.mean().item(),
             "min_reward": rewards_t.min().item(),
             "max_reward": rewards_t.max().item(),
+            "mean_orientation_rms_deg": ori_t.mean().item(),
+            "std_orientation_rms_deg": ori_t.std().item(),
+            "mean_vel_tracking_err_rms": vel_t.mean().item(),
+            "std_vel_tracking_err_rms": vel_t.std().item(),
+            "mean_angvel_tracking_err_rms": angvel_t.mean().item(),
+            "std_angvel_tracking_err_rms": angvel_t.std().item(),
+            "mean_peak_wrench_force_N": force_t.mean().item(),
+            "std_peak_wrench_force_N": force_t.std().item(),
+            "mean_peak_wrench_torque_Nm": torque_t.mean().item(),
+            "std_peak_wrench_torque_Nm": torque_t.std().item(),
         }
         all_speed_results.append(results)
 
@@ -202,6 +268,11 @@ def main():
         print(f"  Mean ep length:   {results['mean_episode_length']:.1f} +/- {results['std_episode_length']:.1f}")
         print(f"  Survival rate:    {results['survival_rate']*100:.1f}%")
         print(f"  Reward range:     [{results['min_reward']:.2f}, {results['max_reward']:.2f}]")
+        print(f"  Orientation RMS:  {results['mean_orientation_rms_deg']:.2f} +/- {results['std_orientation_rms_deg']:.2f} deg")
+        print(f"  Vel tracking err: {results['mean_vel_tracking_err_rms']:.3f} +/- {results['std_vel_tracking_err_rms']:.3f} m/s")
+        print(f"  Angvel track err: {results['mean_angvel_tracking_err_rms']:.3f} +/- {results['std_angvel_tracking_err_rms']:.3f} rad/s")
+        print(f"  Peak wrench F:    {results['mean_peak_wrench_force_N']:.1f} +/- {results['std_peak_wrench_force_N']:.1f} N")
+        print(f"  Peak wrench T:    {results['mean_peak_wrench_torque_Nm']:.1f} +/- {results['std_peak_wrench_torque_Nm']:.1f} Nm")
         print(f"{'='*60}\n")
 
         # Save per-speed results
