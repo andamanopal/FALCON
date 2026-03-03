@@ -12,6 +12,7 @@
 #   B3   current_wrench: +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_current_wrench
 #   B4a  direct_plan:    +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
 #   B4b  direct_plan_critic: +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_critic
+#   B4c  direct_plan_both:  +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_both
 #   B5   anticipose:     +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
 #   B6   cvae:           +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_cvae
 #

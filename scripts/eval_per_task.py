@@ -4,8 +4,8 @@ Orchestrate per-task evaluation across all baselines x tasks x seeds.
 Usage:
     cd FALCON/
     python scripts/eval_per_task.py \
-        --baselines B1,B2,B3,B4a,B4b,B5,B6 \
-        --tasks frontal_reach_lift,lateral_shelf_pick,forward_push,lateral_slam_down,cross_body_reach \
+        --baselines B1,B2,B3,B4a,B4b,B4c,B5,B6 \
+        --tasks frontal_reach_lift,lateral_shelf_pick,forward_push,lateral_slam_down,cross_body_reach,bilateral_asymmetric_lift,overhead_reach,backward_swing \
         --seeds 42,123,456,789,35 \
         --num_episodes 500 \
         --log_dir logs/anticipose_overnight \
@@ -23,6 +23,7 @@ BASELINE_PATTERNS = {
     "B3": "B3_current_wrench",
     "B4a": "B4a_direct_plan",
     "B4b": "B4b_direct_plan_critic",
+    "B4c": "B4c_direct_plan_both",
     "B5": "B5_anticipose",
     "B6": "B6_cvae",
 }
@@ -96,13 +97,14 @@ def run_eval(checkpoint, eval_name, task, num_episodes, num_envs,
 def main():
     parser = argparse.ArgumentParser(description="Per-task evaluation orchestrator")
     parser.add_argument(
-        "--baselines", default="B1,B2,B3,B4a,B4b,B5,B6",
+        "--baselines", default="B1,B2,B3,B4a,B4b,B4c,B5,B6",
         help="Comma-separated baseline IDs",
     )
     parser.add_argument(
         "--tasks",
         default="frontal_reach_lift,lateral_shelf_pick,forward_push,"
-                "lateral_slam_down,cross_body_reach",
+                "lateral_slam_down,cross_body_reach,"
+                "bilateral_asymmetric_lift,overhead_reach,backward_swing",
         help="Comma-separated task names",
     )
     parser.add_argument(

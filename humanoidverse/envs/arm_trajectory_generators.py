@@ -693,22 +693,280 @@ class CrossBodyReach(ArmTrajectoryGenerator):
 
 
 # ---------------------------------------------------------------------------
+# Task 6: BilateralAsymmetricLift  (held-out)
+# ---------------------------------------------------------------------------
+
+class BilateralAsymmetricLift(ArmTrajectoryGenerator):
+    """
+    Held-out Task 3 — One arm lifts HIGH (forward-up pitch + elbow flex),
+    the other reaches LOW laterally (shoulder_roll abduction).
+
+    Tests ASYMMETRIC BILATERAL generalisation: simultaneous roll + pitch
+    torques with opposite character on each arm.  No training task produces
+    this combination.
+
+    Which arm goes "high" vs "lateral" is randomised per episode.
+
+    Joint motions:
+        "High" arm:  shoulder_pitch [0.8, 1.3] rad + elbow [0.3, 0.6] rad
+        "Low"  arm:  shoulder_roll abduction [0.7, 1.1] rad
+
+    Randomised per episode:
+        high_pitch_amp  : high arm shoulder pitch in [0.8, 1.3] rad
+        high_elbow_amp  : high arm elbow flex in [0.3, 0.6] rad
+        low_roll_amp    : low arm shoulder roll in [0.7, 1.1] rad
+        speed           : motion speed in [1.5, 3.0] rad/s
+        hold_time       : sustained hold in [1.0, 2.5] s
+        use_left_high   : bool — True if left arm goes high
+        onset_time      : from base class
+    """
+
+    def _randomize(self, env_ids):
+        n = len(env_ids)
+        device = self.device
+
+        if not hasattr(self, 'high_pitch_amp'):
+            self.high_pitch_amp = torch.zeros(self.num_envs, device=device)
+        self.high_pitch_amp[env_ids] = 0.8 + 0.5 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'high_elbow_amp'):
+            self.high_elbow_amp = torch.zeros(self.num_envs, device=device)
+        self.high_elbow_amp[env_ids] = 0.3 + 0.3 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'low_roll_amp'):
+            self.low_roll_amp = torch.zeros(self.num_envs, device=device)
+        self.low_roll_amp[env_ids] = 0.7 + 0.4 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'speed'):
+            self.speed = torch.zeros(self.num_envs, device=device)
+        self.speed[env_ids] = 1.5 + 1.5 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'hold_time'):
+            self.hold_time = torch.zeros(self.num_envs, device=device)
+        self.hold_time[env_ids] = 1.0 + 1.5 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'use_left_high'):
+            self.use_left_high = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=device
+            )
+        self.use_left_high[env_ids] = torch.randint(
+            0, 2, (n,), device=device
+        ).bool()
+
+    def _compute_targets(self, t):
+        targets = (
+            self.default_arm_pos
+            .unsqueeze(0)
+            .expand(self.num_envs, -1)
+            .clone()
+        )  # (N, 14)
+
+        elapsed = t - self.onset_time
+        # Ramp time based on largest amplitude
+        dominant_amp = torch.max(self.high_pitch_amp, self.low_roll_amp)
+        t_ramp = dominant_amp / self.speed.clamp(min=1e-6)
+        profile = _trapezoid(elapsed, t_ramp, self.hold_time)  # (N,) in [0,1]
+
+        left_high  = self.use_left_high.float()   # (N,) 1 if left goes high
+        right_high = 1.0 - left_high              # (N,) 1 if right goes high
+
+        pitch_delta = profile * self.high_pitch_amp  # (N,)
+        elbow_delta = profile * self.high_elbow_amp  # (N,)
+        roll_delta  = profile * self.low_roll_amp    # (N,)
+
+        # "High" arm: shoulder_pitch forward-up + elbow flex
+        targets[:, 0]  = targets[:, 0]  + left_high  * pitch_delta  # L shoulder_pitch
+        targets[:, 3]  = targets[:, 3]  + left_high  * elbow_delta  # L elbow
+        targets[:, 7]  = targets[:, 7]  + right_high * pitch_delta  # R shoulder_pitch
+        targets[:, 10] = targets[:, 10] + right_high * elbow_delta  # R elbow
+
+        # "Low" arm: shoulder_roll abduction (L: +, R: -)
+        targets[:, 1]  = targets[:, 1]  + right_high * roll_delta   # L roll (low when R is high)
+        targets[:, 8]  = targets[:, 8]  - left_high  * roll_delta   # R roll (low when L is high)
+
+        return targets
+
+
+# ---------------------------------------------------------------------------
+# Task 7: OverheadReach  (held-out)
+# ---------------------------------------------------------------------------
+
+class OverheadReach(ArmTrajectoryGenerator):
+    """
+    Held-out Task 4 — Both arms reach overhead with extreme pitch amplitude.
+
+    Tests AMPLITUDE generalisation: shoulder_pitch [1.5, 1.8] rad is ~3x
+    larger than anything in training (FrontalReachLift uses [0.35, 0.65]).
+    This dramatically shifts CoM upward and challenges balance.
+    Capped at 1.8 rad to avoid self-collision with head/torso.
+
+    Joint motions:
+        Both arms: shoulder_pitch [1.5, 1.8] rad (overhead reach)
+        Slight elbow flex [0.1, 0.3] rad for naturalness
+
+    Randomised per episode:
+        pitch_amp   : shoulder pitch in [1.5, 1.8] rad (within limit of 2.670)
+        elbow_amp   : elbow flex in [0.1, 0.3] rad
+        speed       : motion speed in [1.0, 2.5] rad/s (slower — heavy load)
+        hold_time   : sustained hold in [1.0, 2.0] s
+        onset_time  : from base class
+    """
+
+    def _randomize(self, env_ids):
+        n = len(env_ids)
+        device = self.device
+
+        if not hasattr(self, 'pitch_amp'):
+            self.pitch_amp = torch.zeros(self.num_envs, device=device)
+        self.pitch_amp[env_ids] = 1.5 + 0.3 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'elbow_amp'):
+            self.elbow_amp = torch.zeros(self.num_envs, device=device)
+        self.elbow_amp[env_ids] = 0.1 + 0.2 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'speed'):
+            self.speed = torch.zeros(self.num_envs, device=device)
+        self.speed[env_ids] = 1.0 + 1.5 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'hold_time'):
+            self.hold_time = torch.zeros(self.num_envs, device=device)
+        self.hold_time[env_ids] = 1.0 + 1.0 * torch.rand(n, device=device)
+
+    def _compute_targets(self, t):
+        targets = (
+            self.default_arm_pos
+            .unsqueeze(0)
+            .expand(self.num_envs, -1)
+            .clone()
+        )  # (N, 14)
+
+        elapsed = t - self.onset_time
+        t_ramp = self.pitch_amp / self.speed.clamp(min=1e-6)
+        profile = _trapezoid(elapsed, t_ramp, self.hold_time)  # (N,) in [0,1]
+
+        pitch_delta = profile * self.pitch_amp  # (N,)
+        elbow_delta = profile * self.elbow_amp  # (N,)
+
+        # Both arms symmetrically overhead
+        targets[:, 0]  = targets[:, 0]  + pitch_delta  # L shoulder_pitch
+        targets[:, 7]  = targets[:, 7]  + pitch_delta  # R shoulder_pitch
+        targets[:, 3]  = targets[:, 3]  + elbow_delta  # L elbow
+        targets[:, 10] = targets[:, 10] + elbow_delta  # R elbow
+
+        return targets
+
+
+# ---------------------------------------------------------------------------
+# Task 8: BackwardSwing  (held-out)
+# ---------------------------------------------------------------------------
+
+class BackwardSwing(ArmTrajectoryGenerator):
+    """
+    Held-out Task 5 — One arm swings backward (posterior pitch).
+
+    Tests DIRECTIONAL generalisation: negative shoulder_pitch is completely
+    UNSEEN in all training tasks (which only use positive/forward pitch).
+    The posterior swing generates a sagittal-plane torque in the opposite
+    direction to anything experienced during training.
+
+    Joint motions:
+        One arm (random L/R): shoulder_pitch [-0.5, -1.0] rad (backward)
+        Small shoulder_roll [0.1, 0.3] rad to clear torso
+        Speed [2.0, 3.5] rad/s (fast swing), hold [0.5, 1.5] s
+
+    Randomised per episode:
+        pitch_amp   : backward swing angle in [0.5, 1.0] rad (applied as negative)
+        roll_amp    : torso clearance roll in [0.1, 0.3] rad
+        speed       : motion speed in [2.0, 3.5] rad/s
+        hold_time   : sustained hold in [0.5, 1.5] s
+        use_left    : bool — which arm swings
+        onset_time  : from base class
+    """
+
+    def _randomize(self, env_ids):
+        n = len(env_ids)
+        device = self.device
+
+        if not hasattr(self, 'pitch_amp'):
+            self.pitch_amp = torch.zeros(self.num_envs, device=device)
+        self.pitch_amp[env_ids] = 0.5 + 0.5 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'roll_amp'):
+            self.roll_amp = torch.zeros(self.num_envs, device=device)
+        self.roll_amp[env_ids] = 0.1 + 0.2 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'speed'):
+            self.speed = torch.zeros(self.num_envs, device=device)
+        self.speed[env_ids] = 2.0 + 1.5 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'hold_time'):
+            self.hold_time = torch.zeros(self.num_envs, device=device)
+        self.hold_time[env_ids] = 0.5 + 1.0 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'use_left'):
+            self.use_left = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=device
+            )
+        self.use_left[env_ids] = torch.randint(
+            0, 2, (n,), device=device
+        ).bool()
+
+    def _compute_targets(self, t):
+        targets = (
+            self.default_arm_pos
+            .unsqueeze(0)
+            .expand(self.num_envs, -1)
+            .clone()
+        )  # (N, 14)
+
+        elapsed = t - self.onset_time
+        t_ramp = self.pitch_amp / self.speed.clamp(min=1e-6)
+        profile = _trapezoid(elapsed, t_ramp, self.hold_time)  # (N,) in [0,1]
+
+        left_mask  = self.use_left.float()   # (N,)
+        right_mask = 1.0 - left_mask         # (N,)
+
+        # Negative pitch = backward swing
+        pitch_delta = profile * self.pitch_amp  # (N,) positive magnitude
+        roll_delta  = profile * self.roll_amp   # (N,)
+
+        # Apply backward pitch (negative direction)
+        targets[:, 0] = targets[:, 0] - left_mask  * pitch_delta  # L shoulder_pitch (-)
+        targets[:, 7] = targets[:, 7] - right_mask * pitch_delta  # R shoulder_pitch (-)
+
+        # Small roll for torso clearance (L: +abduct, R: -abduct)
+        targets[:, 1] = targets[:, 1] + left_mask  * roll_delta   # L shoulder_roll (+)
+        targets[:, 8] = targets[:, 8] - right_mask * roll_delta   # R shoulder_roll (-)
+
+        return targets
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
 TASK_REGISTRY = {
-    "frontal_reach_lift":  FrontalReachLift,
-    "lateral_shelf_pick":  LateralShelfPick,
-    "forward_push":        ForwardPush,
-    "lateral_slam_down":   LateralSlamDown,
-    "cross_body_reach":    CrossBodyReach,
+    "frontal_reach_lift":          FrontalReachLift,
+    "lateral_shelf_pick":          LateralShelfPick,
+    "forward_push":                ForwardPush,
+    "lateral_slam_down":           LateralSlamDown,
+    "cross_body_reach":            CrossBodyReach,
+    "bilateral_asymmetric_lift":   BilateralAsymmetricLift,
+    "overhead_reach":              OverheadReach,
+    "backward_swing":              BackwardSwing,
 }
 
 # Training tasks (used by RandomTaskSampler)
 TRAINING_TASKS = ["frontal_reach_lift", "lateral_shelf_pick", "forward_push"]
 
 # Held-out tasks (evaluation only)
-HELD_OUT_TASKS = ["lateral_slam_down", "cross_body_reach"]
+HELD_OUT_TASKS = [
+    "lateral_slam_down",
+    "cross_body_reach",
+    "bilateral_asymmetric_lift",
+    "overhead_reach",
+    "backward_swing",
+]
 
 
 # ---------------------------------------------------------------------------

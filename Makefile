@@ -8,6 +8,7 @@
 #   B3   Current Wrench           — 6-dim current wrench in actor obs
 #   B4a  Direct Plan (Actor)      — 70-dim arm plan in actor obs
 #   B4b  Direct Plan (Critic)     — 70-dim arm plan in critic only
+#   B4c  Direct Plan (Both)       — 70-dim arm plan in BOTH actor AND critic
 #   B5   AnticiPose (ours)        — 30-dim predicted future wrench
 #   B6   CVAE Latent              — 30-dim CVAE latent encoding of arm plan
 #
@@ -78,6 +79,7 @@ OBS_EXTENDED_HIST = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_ex
 OBS_CURRENT_WR    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_current_wrench
 OBS_DIRECT_PLAN   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan
 OBS_DIRECT_CRIT   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_critic
+OBS_DIRECT_BOTH   = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_direct_plan_both
 OBS_ANTICIPOSE    = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose
 OBS_ANTICIPOSE_CW = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose_current_wrench
 OBS_ANTICIPOSE_CW_DELTA  = +obs=dec_loco/g1_29dof_obs_diff_force_history_wolinvel_ma_anticipose_cw_delta
@@ -99,14 +101,14 @@ find_ckpt = $(call find_dir,$(1))/model_$(NUM_ITERS).pt
 .DEFAULT_GOAL := help
 
 .PHONY: help
-.PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b5 train-b5c train-b5c-delta train-b5c-h1 train-b5c-h1-delta train-b6
+.PHONY: train-b1 train-b2 train-b3 train-b4a train-b4b train-b4c train-b5 train-b5c train-b5c-delta train-b5c-h1 train-b5c-h1-delta train-b6
 .PHONY: train-pipeline train-pipeline-tmux pipeline-status pipeline-resume
 .PHONY: collect-wrench train-predictor eval-predictor train-cvae
 .PHONY: collect-wrench-v2 train-predictor-v2 eval-predictor-v2 train-b5c-v2
-.PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b5c-v2 eval-b5c-delta eval-b5c-h1 eval-b5c-h1-delta eval-b6
+.PHONY: eval-all eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b4c eval-b5 eval-b5c eval-b5c-v2 eval-b5c-delta eval-b5c-h1 eval-b5c-h1-delta eval-b6
 .PHONY: smoke-test retrain-b5 train-b5-ft eval-b5-ft
 .PHONY: sync-wandb results
-.PHONY: eval-per-task collect-torque plot-figures
+.PHONY: eval-per-task collect-torque plot-figures measure-advantage-variance
 
 # ============================================================================
 # INDIVIDUAL TRAINING TARGETS
@@ -149,6 +151,14 @@ train-b4b:
 	$(TRAIN_CMD) $(COMMON) $(OBS_DIRECT_CRIT) \
 	  project_name=$(PROJECT) \
 	  experiment_name=B4b_direct_plan_critic_seed$(SEED) \
+	  env.config.anticipose_mode=direct_plan \
+	  algo.config.num_learning_iterations=$(NUM_ITERS)
+
+## train-b4c: Train B4c direct plan (both actor AND critic) — 2x2 factorial cell
+train-b4c:
+	$(TRAIN_CMD) $(COMMON) $(OBS_DIRECT_BOTH) \
+	  project_name=$(PROJECT) \
+	  experiment_name=B4c_direct_plan_both_seed$(SEED) \
 	  env.config.anticipose_mode=direct_plan \
 	  algo.config.num_learning_iterations=$(NUM_ITERS)
 
@@ -556,8 +566,8 @@ train-pipeline-tmux:
 # EVALUATION TARGETS
 # ============================================================================
 
-## eval-all: Evaluate all baselines on train + held-out tasks (B5c included if trained)
-eval-all: eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b5 eval-b5c eval-b6
+## eval-all: Evaluate all baselines on train + held-out tasks (B4c/B5c included if trained)
+eval-all: eval-b1 eval-b2 eval-b3 eval-b4a eval-b4b eval-b4c eval-b5 eval-b5c eval-b6
 	@echo ""
 	@echo "========================================"
 	@echo "  ALL EVALUATIONS COMPLETE (seed=$(SEED))"
@@ -654,6 +664,25 @@ eval-b4b:
 	$(EVAL_CMD) \
 	  --checkpoint $${B4B_DIR}/model_$(NUM_ITERS).pt \
 	  --eval_name eval_B4b_direct_plan_critic_heldout_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task lateral_slam_down \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS)
+
+## eval-b4c: Evaluate B4c direct plan (both actor AND critic)
+eval-b4c:
+	@B4C_DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*B4c_direct_plan_both_seed$(SEED)* 2>/dev/null | head -1) && \
+	if [ -z "$$B4C_DIR" ]; then echo "SKIP: B4c not found for seed $(SEED)"; exit 0; fi && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B4C_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B4c_direct_plan_both_train_s$(SEED) \
+	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
+	  --max_episode_length_s $(MAX_EP_LEN_S) \
+	  --arm_trajectory_task random \
+	  --output_dir $(OUTPUT_DIR) $(EVAL_EXTRA_ARGS) && \
+	$(EVAL_CMD) \
+	  --checkpoint $${B4C_DIR}/model_$(NUM_ITERS).pt \
+	  --eval_name eval_B4c_direct_plan_both_heldout_s$(SEED) \
 	  --num_episodes $(NUM_EPISODES) --num_envs $(EVAL_NUM_ENVS) \
 	  --max_episode_length_s $(MAX_EP_LEN_S) \
 	  --arm_trajectory_task lateral_slam_down \
@@ -825,7 +854,7 @@ smoke-test:
 
 ## sync-wandb: Re-log TensorBoard data to WandB for all baselines
 sync-wandb:
-	@for mode in B1_reactive B2_extended_history B3_current_wrench B4a_direct_plan B4b_direct_plan_critic B5_anticipose B6_cvae; do \
+	@for mode in B1_reactive B2_extended_history B3_current_wrench B4a_direct_plan B4b_direct_plan_critic B4c_direct_plan_both B5_anticipose B6_cvae; do \
 	  DIR=$$(ls -td $(LOG_DIR)/$(PROJECT)/*$${mode}_seed$(SEED)* 2>/dev/null | head -1) ; \
 	  if [ -n "$$DIR" ]; then \
 	    python scripts/sync_wandb.py "$$DIR" "$${mode}_seed$(SEED)" ; \
@@ -850,12 +879,12 @@ results:
 # PER-TASK EVALUATION, TORQUE COLLECTION & PAPER FIGURES
 # ============================================================================
 
-TASKS = frontal_reach_lift,lateral_shelf_pick,forward_push,lateral_slam_down,cross_body_reach
+TASKS = frontal_reach_lift,lateral_shelf_pick,forward_push,lateral_slam_down,cross_body_reach,bilateral_asymmetric_lift,overhead_reach,backward_swing
 
 ## eval-per-task: Run per-task evaluation for all baselines x tasks x seeds
 eval-per-task:
 	python scripts/eval_per_task.py \
-	  --baselines B1,B2,B3,B4a,B4b,B5,B6 \
+	  --baselines B1,B2,B3,B4a,B4b,B4c,B5,B6 \
 	  --tasks $(TASKS) \
 	  --seeds $(SEED) \
 	  --num_episodes $(NUM_EPISODES) \
@@ -886,6 +915,16 @@ collect-torque:
 	  --num_episodes 50 --num_envs $(EVAL_NUM_ENVS) \
 	  --output torque_data/B5_lateral_shelf_pick_s$(SEED).pt
 
+## measure-advantage-variance: Measure advantage variance across B1/B4a/B4b/B4c (Experiment A)
+measure-advantage-variance:
+	python scripts/measure_advantage_variance.py \
+	  --baselines B1,B4a,B4b,B4c \
+	  --seeds 42,123,456,789,35 \
+	  --num_rollout_steps 24 \
+	  --num_iters $(NUM_ITERS) \
+	  --log_dir $(LOG_DIR)/$(PROJECT) \
+	  --output_dir $(OUTPUT_DIR)/advantage_variance
+
 ## plot-figures: Generate all paper figures (CPU-only, run locally)
 plot-figures:
 	python scripts/plot_main_results_box.py --output_dir ../paper/figures
@@ -907,8 +946,8 @@ help:
 	@echo "Baselines:"
 	@echo "  B1   Reactive (FALCON)         B2   Extended History (10-step)"
 	@echo "  B3   Current Wrench            B4a  Direct Plan (Actor)"
-	@echo "  B4b  Direct Plan (Critic)      B5   AnticiPose (ours)"
-	@echo "  B6   CVAE Latent"
+	@echo "  B4b  Direct Plan (Critic)      B4c  Direct Plan (Both)"
+	@echo "  B5   AnticiPose (ours)         B6   CVAE Latent"
 	@echo ""
 	@echo "Quick iteration (retrain predictor + B5 only, ~4-7h):"
 	@echo "  make retrain-b5 SEED=42 COLLECT_SAMPLES=2000000 PRED_EPOCHS=500 PRED_PATIENCE=20"
