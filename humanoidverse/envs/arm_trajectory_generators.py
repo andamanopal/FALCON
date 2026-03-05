@@ -942,6 +942,165 @@ class BackwardSwing(ArmTrajectoryGenerator):
 
 
 # ---------------------------------------------------------------------------
+# Task 9: FrontalRaise  (held-out, video-friendly)
+# ---------------------------------------------------------------------------
+
+class FrontalRaise(ArmTrajectoryGenerator):
+    """
+    Held-out Task — Both arms raise forward and upward (negative pitch).
+
+    Visually dramatic: arms swing forward to ~90 degrees (shoulder height)
+    then hold.  Uses NEGATIVE shoulder_pitch per G1 URDF convention
+    (positive pitch = backward, negative = forward).
+
+    Amplitude [1.2, 1.6] rad (~69-92 degrees forward) is much larger than
+    training FrontalReachLift [0.35, 0.65] rad, testing amplitude
+    generalisation.
+
+    Joint motions:
+        Both arms: shoulder_pitch [-1.6, -1.2] rad (forward raise)
+        Elbow flex [0.2, 0.5] rad (bent arm for naturalness)
+
+    Randomised per episode:
+        pitch_amp   : forward pitch magnitude in [1.2, 1.6] rad
+        elbow_amp   : elbow flex in [0.2, 0.5] rad
+        speed       : motion speed in [1.5, 3.0] rad/s
+        hold_time   : sustained hold in [1.0, 2.0] s
+        onset_time  : from base class
+    """
+
+    def _randomize(self, env_ids):
+        n = len(env_ids)
+        device = self.device
+
+        if not hasattr(self, 'pitch_amp'):
+            self.pitch_amp = torch.zeros(self.num_envs, device=device)
+        self.pitch_amp[env_ids] = 1.2 + 0.4 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'elbow_amp'):
+            self.elbow_amp = torch.zeros(self.num_envs, device=device)
+        self.elbow_amp[env_ids] = 0.2 + 0.3 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'speed'):
+            self.speed = torch.zeros(self.num_envs, device=device)
+        self.speed[env_ids] = 1.5 + 1.5 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'hold_time'):
+            self.hold_time = torch.zeros(self.num_envs, device=device)
+        self.hold_time[env_ids] = 1.0 + 1.0 * torch.rand(n, device=device)
+
+    def _compute_targets(self, t):
+        targets = (
+            self.default_arm_pos
+            .unsqueeze(0)
+            .expand(self.num_envs, -1)
+            .clone()
+        )  # (N, 14)
+
+        elapsed = t - self.onset_time
+        t_ramp = self.pitch_amp / self.speed.clamp(min=1e-6)
+        profile = _trapezoid(elapsed, t_ramp, self.hold_time)  # (N,) in [0,1]
+
+        pitch_delta = profile * self.pitch_amp  # (N,)
+        elbow_delta = profile * self.elbow_amp  # (N,)
+
+        # Both arms forward: NEGATIVE pitch = forward in G1 URDF
+        targets[:, 0]  = targets[:, 0]  - pitch_delta  # L shoulder_pitch
+        targets[:, 7]  = targets[:, 7]  - pitch_delta  # R shoulder_pitch
+        targets[:, 3]  = targets[:, 3]  + elbow_delta  # L elbow
+        targets[:, 10] = targets[:, 10] + elbow_delta  # R elbow
+
+        return targets
+
+
+# ---------------------------------------------------------------------------
+# Task 10: GangnamStyle  (held-out, periodic)
+# ---------------------------------------------------------------------------
+
+class GangnamStyle(ArmTrajectoryGenerator):
+    """
+    Held-out Task — Periodic 'Gangnam Style' horse-riding arm motion.
+
+    Tests PERIODIC generalisation: all training tasks are single-shot
+    (ramp-hold-retract).  This task produces continuous oscillating
+    disturbances that the policy has never experienced.
+
+    Motion:
+        Right arm: 'lasso' — shoulder forward + elbow pumps up/down
+        Left arm:  'reins' — shoulder forward + alternating elbow flex
+
+    Both arms oscillate at 2-3 Hz with a phase offset, creating an
+    asymmetric periodic disturbance.
+
+    Randomised per episode:
+        freq        : oscillation frequency in [2.0, 3.0] Hz
+        pitch_base  : forward pitch baseline in [0.6, 1.0] rad
+        elbow_range : elbow oscillation amplitude in [0.3, 0.6] rad
+        roll_range  : right arm roll oscillation in [0.2, 0.5] rad
+        onset_time  : from base class
+    """
+
+    def _randomize(self, env_ids):
+        n = len(env_ids)
+        device = self.device
+
+        if not hasattr(self, 'freq'):
+            self.freq = torch.zeros(self.num_envs, device=device)
+        self.freq[env_ids] = 2.0 + 1.0 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'pitch_base'):
+            self.pitch_base = torch.zeros(self.num_envs, device=device)
+        self.pitch_base[env_ids] = 0.6 + 0.4 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'elbow_range'):
+            self.elbow_range = torch.zeros(self.num_envs, device=device)
+        self.elbow_range[env_ids] = 0.3 + 0.3 * torch.rand(n, device=device)
+
+        if not hasattr(self, 'roll_range'):
+            self.roll_range = torch.zeros(self.num_envs, device=device)
+        self.roll_range[env_ids] = 0.2 + 0.3 * torch.rand(n, device=device)
+
+    def _compute_targets(self, t):
+        targets = (
+            self.default_arm_pos
+            .unsqueeze(0)
+            .expand(self.num_envs, -1)
+            .clone()
+        )  # (N, 14)
+
+        elapsed = t - self.onset_time  # (N,)
+        active = (elapsed >= 0.0).float()
+
+        # Ramp in over 0.3s so it doesn't start with a jerk
+        ramp = (elapsed / 0.3).clamp(0.0, 1.0) * active
+
+        omega = 2.0 * 3.14159 * self.freq  # (N,) angular frequency
+        phase = omega * elapsed  # (N,)
+
+        # Sinusoidal oscillation
+        sin_phase = torch.sin(phase)            # main beat
+        cos_phase = torch.cos(phase)            # offset beat
+        sin_double = torch.sin(2.0 * phase)     # double-time for lasso
+
+        # Both arms forward (negative pitch = forward in G1)
+        pitch_fwd = ramp * self.pitch_base  # (N,)
+        targets[:, 0] = targets[:, 0] - pitch_fwd   # L shoulder_pitch
+        targets[:, 7] = targets[:, 7] - pitch_fwd   # R shoulder_pitch
+
+        # Right arm 'lasso': elbow pumps + shoulder roll oscillation
+        r_elbow = ramp * self.elbow_range * (0.5 + 0.5 * sin_phase)   # 0 to elbow_range
+        r_roll = ramp * self.roll_range * sin_double                    # oscillating roll
+        targets[:, 10] = targets[:, 10] + r_elbow   # R elbow
+        targets[:, 8] = targets[:, 8] - r_roll      # R shoulder_roll (negative = abduct)
+
+        # Left arm 'reins': elbow pumps anti-phase
+        l_elbow = ramp * self.elbow_range * (0.5 + 0.5 * cos_phase)   # anti-phase
+        targets[:, 3] = targets[:, 3] + l_elbow     # L elbow
+
+        return targets
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -954,6 +1113,8 @@ TASK_REGISTRY = {
     "bilateral_asymmetric_lift":   BilateralAsymmetricLift,
     "overhead_reach":              OverheadReach,
     "backward_swing":              BackwardSwing,
+    "frontal_raise":               FrontalRaise,
+    "gangnam_style":               GangnamStyle,
 }
 
 # Training tasks (used by RandomTaskSampler)
@@ -966,6 +1127,8 @@ HELD_OUT_TASKS = [
     "bilateral_asymmetric_lift",
     "overhead_reach",
     "backward_swing",
+    "frontal_raise",
+    "gangnam_style",
 ]
 
 

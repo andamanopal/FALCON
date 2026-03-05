@@ -24,6 +24,8 @@ import math
 import sys
 from pathlib import Path
 
+import isaacgym  # noqa: F401  — must be imported before torch/omegaconf
+
 from omegaconf import OmegaConf
 
 # Register FALCON's custom OmegaConf resolvers before any config loading
@@ -69,10 +71,11 @@ def find_checkpoint(log_dir, pattern, seed, num_iters):
 
 def compute_raw_gae(values, rewards, dones, last_values, gamma, lam):
     """
-    Compute raw (un-normalised) GAE advantages.
+    Compute raw (un-normalised) GAE advantages AND per-step TD errors.
 
     Replicates the exact logic from PPOMultiActorCritic._compute_returns()
-    but returns the raw advantages before mean/std normalisation.
+    but returns the raw advantages before mean/std normalisation,
+    plus the one-step TD errors (deltas).
 
     Args:
         values      : (num_steps, num_envs, 1) critic value estimates
@@ -84,9 +87,11 @@ def compute_raw_gae(values, rewards, dones, last_values, gamma, lam):
 
     Returns:
         raw_advantages : (num_steps, num_envs, 1)
+        td_errors      : (num_steps, num_envs, 1) one-step TD errors
     """
     num_steps = values.shape[0]
     returns = values.clone()
+    td_errors = values.clone()
     advantage = 0
 
     for step in reversed(range(num_steps)):
@@ -100,13 +105,14 @@ def compute_raw_gae(values, rewards, dones, last_values, gamma, lam):
             + next_is_not_terminal * gamma * next_values
             - values[step]
         )
+        td_errors[step] = delta
         advantage = (
             delta + next_is_not_terminal * gamma * lam * advantage
         )
         returns[step] = advantage + values[step]
 
     raw_advantages = returns - values
-    return raw_advantages
+    return raw_advantages, td_errors
 
 
 def run_rollout_and_measure(ckpt_path, num_rollout_steps, device):
@@ -115,7 +121,6 @@ def run_rollout_and_measure(ckpt_path, num_rollout_steps, device):
 
     Returns dict with per-body-key advantage variance and overall stats.
     """
-    import isaacgym  # noqa: F401
     import torch
     from hydra.utils import instantiate
     from humanoidverse.utils.helpers import pre_process_config
@@ -220,25 +225,33 @@ def run_rollout_and_measure(ckpt_path, num_rollout_steps, device):
         rewards_t = torch.stack(collected[key]["rewards"], dim=0)
         dones_t = torch.stack(collected[key]["dones"], dim=0)
 
-        raw_adv = compute_raw_gae(
+        raw_adv, td_err = compute_raw_gae(
             values_t, rewards_t, dones_t, last_values[key], gamma, lam
         )
 
         # Variance across all (steps, envs) — scalar
         adv_flat = raw_adv.reshape(-1)
+        td_flat = td_err.reshape(-1)
         results[key] = {
             "advantage_variance": adv_flat.var().item(),
             "advantage_mean": adv_flat.mean().item(),
             "advantage_std": adv_flat.std().item(),
             "advantage_abs_mean": adv_flat.abs().mean().item(),
+            "td_error_variance": td_flat.var().item(),
+            "td_error_mean": td_flat.mean().item(),
+            "td_error_std": td_flat.std().item(),
+            "td_error_abs_mean": td_flat.abs().mean().item(),
             "num_samples": adv_flat.numel(),
         }
 
     # Overall (average across body keys)
     all_vars = [results[k]["advantage_variance"] for k in keys]
+    all_td_vars = [results[k]["td_error_variance"] for k in keys]
     results["overall"] = {
         "advantage_variance_mean": sum(all_vars) / len(all_vars),
+        "td_error_variance_mean": sum(all_td_vars) / len(all_td_vars),
         "per_key_variances": {k: results[k]["advantage_variance"] for k in keys},
+        "per_key_td_variances": {k: results[k]["td_error_variance"] for k in keys},
     }
 
     # Clean up GPU memory
